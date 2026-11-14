@@ -468,9 +468,24 @@ P90/分           115.8 MB
 
 ### 執行方式（`avg-move-programfiles.ps1`）
 
+> **2026-11-15 更正：本機的 WinRE 映像不存在，所以「Shift + 重新啟動 → 疑難排解 → 啟動設定」
+> 這條路走不通。** 實測 `C:\Windows\System32\Recovery\Winre.wim` 與
+> `C:\Recovery\WindowsRE\Winre.wim` 都不存在，`ReAgent.xml` 卻在 06:49 被改過；
+> 三次重開機（06:44 / 06:58 / 07:10）都是 `RuntimeBroker` 發起的**正常重新啟動**，
+> 沒有出現任何選單。「進階啟動」選單是 WinRE 提供的，映像不在就只剩正常開機。
+>
+> 改用下列任一方式，兩者都不需要 WinRE：
+>
+> - **msconfig（首選，最不容易出錯）**：Win+R → `msconfig` → 「開機」頁 → 勾「安全開機」→
+>   套用 → 確定 → 重新啟動。做完事後**回去取消勾選**再重新啟動。
+> - **`safemode.ps1 -Enter`**：用 `bcdedit` 指定下一次開機進安全模式；
+>   做完用 `-Exit` 清除。注意本機 bcdedit 對 `{current}`／`{default}` 會回
+>   「指定的命令列選項無效」，所以腳本改用 `/enum ACTIVE` 讀出的真實 GUID。
+
 ```powershell
-# 1) 安全模式：按住 Shift → 開始 → 電源 → 重新啟動
-#    疑難排解 → 進階選項 → 啟動設定 → 重新啟動 → 按 4
+# 0) 讓下一次開機直接進安全模式（不需 WinRE）
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\safemode.ps1','-Enter'
+#    或用 msconfig 勾「安全開機」，效果相同
 
 # 2) 安全模式中提權執行搬移
 Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-move-programfiles.ps1','-Move'
@@ -522,6 +537,7 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy',
 | `remove-quark.ps1` | 移除夸克网盘 + 清懸空引用 | 否 | 否（需重裝） |
 | `move-asus-ime-log.ps1` | 停 ASUS IME 的 ETW 追蹤（`-StopTrace`）或把 log 搬 D: | 否 | 是（`-Revert`） |
 | `move-pagefile.ps1` | 主分頁檔搬到 D:（C: 省 22 GB） | 否 | 是（`-Revert`） |
+| `safemode.ps1` | 指定／取消「下一次開機進安全模式」（`bcdedit`） | — | 是（`-Exit`） |
 
 ### 建議順序
 

@@ -60,6 +60,7 @@ internal static class CWatch
     private static readonly object _irpLock = new object();
     private static long _dupesSkipped;
     private static long _skippedStart;
+    private static long _skippedNoFo;
     private static long _opcodeSamples;
     private const long DupeWindowTicks = 30000;   // 3 毫秒（100ns 單位）
 
@@ -361,14 +362,11 @@ internal static class CWatch
             }
         }
 
-        // 2) 其次用 TraceEvent 自己填的檔名。
-        //    但只在事件「有 FileObject」時才採信：沒有 FileObject 的事件，函式庫會回傳
-        //    *別的檔案* 的舊路徑，實測造成 Robocopy 的 F: 流量被誤標成 C:/D:。
-        if (path == null && fileObject != 0)
-        {
-            string n = NormalizePath(fileName);
-            if (n != null) { path = n; source = "trace"; }
-        }
+        // 2) 不再採信 TraceEvent 自己填的檔名。
+        //    它的對照表只用 FileObject 當鍵、沒有 PID、沒有時效，指標一被回收就會回傳
+        //    *別的程式的別的檔案* 路徑。實測造成 Robocopy 的 F: 流量被標成
+        //    「C:\Users\ufft4\ApplicationInsightsDiagnostics.json 1.38 GB」這種假答案。
+        //    查不到就是查不到，寧可算 (device)。
 
         // 3) 都沒有 → 裝置／pipe／主控台，沒有檔案路徑
         if (path == null) { path = "(device)"; source = "device"; }
@@ -519,8 +517,8 @@ internal static class CWatch
         {
             string dir = Path.Combine(_root, @"data\state");
             if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            long evW, evC, bytes, zero, unresolved, rm, rt, rd, jr, ds, ss, os;
-            lock (_lock) { evW = _evWrite; evC = _evCreate; bytes = _bytesTotal; zero = _zeroSizeWrites; unresolved = _unresolvedBytes; rm = _resolvedMap; rt = _resolvedTrace; rd = _resolvedDevice; jr = Interlocked.Read(ref _junctionResolved); ds = Interlocked.Read(ref _dupesSkipped); ss = Interlocked.Read(ref _skippedStart); os = Interlocked.Read(ref _opcodeSamples); }
+            long evW, evC, bytes, zero, unresolved, rm, rt, rd, jr, ds, ss, os, sf;
+            lock (_lock) { evW = _evWrite; evC = _evCreate; bytes = _bytesTotal; zero = _zeroSizeWrites; unresolved = _unresolvedBytes; rm = _resolvedMap; rt = _resolvedTrace; rd = _resolvedDevice; jr = Interlocked.Read(ref _junctionResolved); ds = Interlocked.Read(ref _dupesSkipped); ss = Interlocked.Read(ref _skippedStart); sf = Interlocked.Read(ref _skippedNoFo); os = Interlocked.Read(ref _opcodeSamples); }
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("{");
             sb.AppendLine("  \"state\": \"" + state + "\",");
@@ -537,6 +535,7 @@ internal static class CWatch
             sb.AppendLine("  \"junction_remapped\": " + jr + ",");
             sb.AppendLine("  \"dupes_skipped\": " + ds + ",");
             sb.AppendLine("  \"skipped_start\": " + ss + ",");
+            sb.AppendLine("  \"skipped_no_fileobj\": " + sf + ",");
             sb.AppendLine("  \"opcode_samples\": " + os + ",");
             sb.AppendLine("  \"writes_without_size\": " + zero);
             sb.AppendLine("}");
@@ -612,6 +611,9 @@ internal static class CWatch
                         if (n <= 6) Log("event sample: opcode=" + (int)d.Opcode + "/" + d.OpcodeName + " size=" + d.IoSize + " fo=" + d.FileObject);
                     }
                     if (IsStartEvent(d)) { Interlocked.Increment(ref _skippedStart); return; }
+                    // FileIOInit 讓每筆 I/O 產生兩個事件，實測只有一個帶 FileObject
+                    // （另一個是 0）。略過沒有 FileObject 的，避免同一筆被算兩次。
+                    if (d.FileObject == 0) { Interlocked.Increment(ref _skippedNoFo); return; }
                     Record(d.ProcessID, d.ProcessName, d.FileObject, d.FileName, d.IoSize, d.IrpPtr, (long)(d.TimeStampRelativeMSec * 10000.0));
                 }
                 catch { }
@@ -675,6 +677,7 @@ internal static class CWatch
             try
             {
                 if (IsStartEvent(d)) { Interlocked.Increment(ref _skippedStart); return; }
+                if (d.FileObject == 0) { Interlocked.Increment(ref _skippedNoFo); return; }
                 Record(d.ProcessID, d.ProcessName, d.FileObject, d.FileName, d.IoSize, d.IrpPtr, (long)(d.TimeStampRelativeMSec * 10000.0));
             }
             catch { }

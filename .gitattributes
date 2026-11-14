@@ -1,0 +1,7 @@
+# 不要做行尾轉換：.ps1 含 BOM，且是這台機器上直接執行用的檔案。
+# 交給 git 轉換 CRLF/LF 只會製造無意義的 diff，甚至弄壞 BOM。
+* -text
+
+# 二進位
+*.exe binary
+*.dll binary

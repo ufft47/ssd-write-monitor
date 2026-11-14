@@ -1,0 +1,23 @@
+# 執行期資料：每天成長，不進版控
+data/
+reports/
+logs/
+
+# 建置產物（可由 build.ps1 重建）
+*.exe
+*.exe.bak-*
+*.pdb
+
+# 暫存
+*.tmp
+*.log
+Thumbs.db
+desktop.ini
+
+# build.ps1 會把 lib\*.dll 複製到 cwatch\ 根目錄（執行期需要），那是產物
+src/cwatch/*.dll
+
+# 安裝腳本產生的隱藏啟動器（內容是機器專屬路徑）
+src/run-hidden.vbs
+src/cwatch/collector-hidden.vbs
+src/tray/tray-hidden.vbs

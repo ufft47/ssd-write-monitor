@@ -427,6 +427,81 @@ P90/分           115.8 MB
 
 ---
 
+## 把 AVG 的目錄搬到 D:（含為什麼選安全模式）
+
+`C:\Program Files\AVG` 是 AVG **寫入最兇的目錄**（2026-11-15 實測：可信寫入 523 MB，
+其中定義更新 `defs\*.tmp` 300.6 MB、`AvVps\*.ipending` 222.0 MB），
+但它同時是**最難搬的**。原因與對策如下。
+
+### 障礙：自我保護驅動
+
+| 項目 | 實測 |
+|---|---|
+| `avgSP.sys` | `State=Running`、`StartMode=System`，在 `C:\WINDOWS\system32\drivers\` |
+| 其他 AVG 驅動 | 共 **16 個**（`avgArDisk`／`avgArPot`／`avgbidsdriver`／`avgbidsh`／`avgbuniv`／`avgDrvBrg`／`avgElam`／`avgKbd`／`avgMonFlt`／`avgNetHub`／`avgRdr`／`avgRvrt`／`avgSnx`／`avgStm`／`avgVmm`）全部 Running |
+| `C:\Program Files\AVG` 的 ACL | Administrators 有 FullControl —— **不是 ACL 擋的** |
+
+所以正常開機狀態下「改名這個目錄」一定失敗：`avgSP` 會拒絕，而且 16 個驅動握著裡面的檔案。
+
+### 為什麼不是「把 16 個驅動設停用 → 重開機」
+
+那條路要改 `HKLM\SYSTEM\CurrentControlSet\Services\avg*` 的 `Start` 值，但這些鍵本身受 AVG 保護，
+且改壞會讓防毒停在半殘狀態（驅動不載入、服務照跑），比搬目錄本身危險。
+
+### 實測：安全模式就能解鎖
+
+| 查證 | 結果 |
+|---|---|
+| `Control\SafeBoot\Minimal`（85 項）的 AVG 相關項目 | 只有一個叫 **`avgSP.sys`** 的殘留項目 |
+| `Control\SafeBoot\Network`（143 項） | 同上 |
+| 真正的服務名 `avgSP` 是否在清單內 | **不在**（`avgSP.sys` 對不上 `avgSP`，那個項目沒有任何作用） |
+| 16 個 AVG 驅動在安全模式 | **全部不載入** |
+| `Winmgmt`（互鎖要用的 WMI）是否在 Minimal | **在**，所以安全模式下 `Get-CimInstance` 可用 |
+
+結論：**安全模式 = 一個 AVG 完全不存在的環境**，而那正是搬目錄需要的狀態。
+一次重開機即可，不必碰任何驅動登錄鍵。
+
+### 執行方式（`avg-move-programfiles.ps1`）
+
+```powershell
+# 1) 安全模式：按住 Shift → 開始 → 電源 → 重新啟動
+#    疑難排解 → 進階選項 → 啟動設定 → 重新啟動 → 按 4
+
+# 2) 安全模式中提權執行搬移
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-move-programfiles.ps1','-Move'
+
+# 3) 正常重新開機後驗證
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-move-programfiles.ps1','-Verify'
+
+# 4) 出事時（安全模式）還原
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-move-programfiles.ps1','-Revert'
+```
+
+### 安全網
+
+- **三重前置檢查**：AVG 行程數、AVG 服務狀態、`sc.exe` 驅動狀態、以及「獨佔開檔測試是否仍被鎖」。
+  任一項成立就中止，且**不改動任何東西**。開機狀態判定失敗（WMI 無回應）時不阻擋，改由這四項把關。
+- **複製先行**：`robocopy /E /COPY:DAT /XJ`（不用 `/MOVE`），逐檔比對 missing 與 size-diff 皆為 0 才動來源。
+- **原件只改名**（`AVG.bak-<時間>`），**不刪除**；改名失敗或落地測試失敗都會自動回滾。
+- **刪 junction 只用 `cmd /c rmdir`**，不加 `/s`（會跟進刪掉 D: 上的目標）。
+
+### 三個必須知道的代價
+
+1. **搬完不會立刻省空間。** 原件留在 `C:\Program Files\AVG.bak-<時間>`（2.5 GB），
+   確認 AVG 穩定運作幾天才刪 —— 那時 C: 才會真正釋放。
+2. **AVG 更新器可能把目錄重建回 C:**。這正是「設定會被改回去」的同一個問題，
+   只是層級換成檔案系統。用 `-Verify` 隨時看 junction 還在不在。
+3. **安全模式期間防毒不存在**。搬移那十幾分鐘機器沒有即時防護，請不要在這段時間上網或插隨身碟。
+
+### 還沒搬的部分
+
+| 路徑 | 大小 | 說明 |
+|---|---|---|
+| `C:\Program Files\Common Files\AVG` | 77.3 MB | `Icarus\avg-av-vps\temp\` 的更新暫存（當日 14.6 MB + 11.3 MB + 3.9 MB）。量小，暫不處理 |
+| `C:\ProgramData\AVG` | 4.67 GB | 由 `avg-clean-and-move.ps1 -MoveProgramData` 處理（含常態快取，當日 198 MB） |
+
+---
+
 ## 版本控制
 
 這個目錄是 git repo（分支 `main`）。

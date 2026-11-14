@@ -9,8 +9,14 @@
 //   data\attrib\YYYY-MM-DD.csv   minute,pid,process,volume,path,bytes,ops
 //   data\state\collector.json    heartbeat
 //
-// Volume is derived from the file path, so a row here means "this process wrote
-// these bytes to this path", which is the only reliable way to answer "who writes C:".
+// Key facts (verified 2026-11-15 with a raw event dump):
+//   * FileIOWrite events are delivered only when Keywords.FileIOInit is enabled.
+//   * Each write produces exactly ONE FileIOWrite event (no duplication); the
+//     event carries IoSize + FileObject, but its FileName is EMPTY (TraceEvent
+//     decodes the kernel event dynamically, id=65535), so the file path must come
+//     from our own FileIOCreate map, keyed by (PID, FileObject).
+//   * IrpPtr is NOT unique per request (FastIO path), so it cannot be used to
+//     deduplicate. There is nothing to deduplicate anyway.
 
 using System;
 using System.Collections.Generic;
@@ -33,7 +39,6 @@ internal static class CWatch
     private static readonly object _lock = new object();
     private static readonly Dictionary<string, MinuteAgg> _minutes = new Dictionary<string, MinuteAgg>();
     private static readonly Dictionary<string, string> _procNameCache = new Dictionary<string, string>();
-    private static readonly Dictionary<string, string> _exePathCache = new Dictionary<string, string>();
     private static long _evWrite;
     private static long _evCreate;
     private static long _bytesTotal;
@@ -41,8 +46,8 @@ internal static class CWatch
     private static long _zeroSizeWrites;
     private static volatile bool _stop;
 
-    // FileObject -> 檔案路徑。FileIO 的 Write 事件常常不帶檔名（只有 Create 帶），
-    // 沒有這張表就會有一半的位元組歸不到任何磁碟區。
+    // FileObject -> 檔案路徑。FileIOWrite 事件不帶檔名（只有 FileIOCreate 帶），
+    // 沒有這張表就歸不到任何磁碟區。
     // 鍵必須含 PID：同一個 FileObject 指標會被不同進程重用，只用指標當鍵會產生
     // 「1.5 GB 寫到某個根本不存在的檔案」這種假答案。
     private static readonly Dictionary<string, object[]> _fileMap = new Dictionary<string, object[]>();
@@ -50,43 +55,7 @@ internal static class CWatch
     private const int MaxFileMapEntries = 50000;
     private static readonly TimeSpan FileMapTtl = TimeSpan.FromMinutes(30);
     private static long _resolvedMap;
-    private static long _resolvedTrace;
     private static long _resolvedDevice;
-
-    // FileIOInit 會讓每筆 I/O 產生「開始 + 完成」兩個事件（TraceEvent 文件明載）。
-    // 實測：拿掉 FileIOInit 就完全收不到 FileIOWrite，所以必須開著，
-    // 改成只採計「非 Start」的那一個，另外用極短窗的 IRP 比對當保險。
-    private static readonly Dictionary<ulong, long[]> _irpSeen = new Dictionary<ulong, long[]>();
-    private static readonly object _irpLock = new object();
-    private static long _dupesSkipped;
-    private static long _skippedStart;
-    private static long _skippedNoFo;
-    private static long _opcodeSamples;
-    private const long DupeWindowTicks = 30000;   // 3 毫秒（100ns 單位）
-
-    private static void PruneIrp(long nowQpc)
-    {
-        List<ulong> dead = null;
-        foreach (KeyValuePair<ulong, long[]> kv in _irpSeen)
-        {
-            if (nowQpc - kv.Value[0] > 10000000)   // 1 秒前的都清掉
-            {
-                if (dead == null) dead = new List<ulong>();
-                dead.Add(kv.Key);
-            }
-        }
-        if (dead != null)
-        {
-            for (int i = 0; i < dead.Count; i++) _irpSeen.Remove(dead[i]);
-        }
-    }
-
-    private static bool IsStartEvent(Microsoft.Diagnostics.Tracing.TraceEvent e)
-    {
-        if (e.Opcode == Microsoft.Diagnostics.Tracing.TraceEventOpcode.Start) return true;
-        string n = e.OpcodeName;
-        return n != null && n.Equals("Start", StringComparison.OrdinalIgnoreCase);
-    }
 
     private static string MapKey(int pid, ulong fileObject)
     {
@@ -143,7 +112,8 @@ internal static class CWatch
     {
         if (string.IsNullOrEmpty(path)) return "(device)";
         if (path == "(device)") return "(device)";
-        string p = path;        if (p.Length >= 2 && p[1] == ':')
+        string p = path;
+        if (p.Length >= 2 && p[1] == ':')
         {
             return (char.ToUpperInvariant(p[0])) + ":";
         }
@@ -162,8 +132,6 @@ internal static class CWatch
     // junction / symlink 會讓「程式使用的路徑」與「實際落盤的磁碟區」不同
     // （例如 C:\Users\ufft4\.local\share\opencode → D:\MX500\opencode\data）。
     // 只對 C: 路徑做解析，並以目錄為單位快取，避免在 ETW 回呼裡做大量檔案系統查詢。
-    // 值 = object[]{ volume, ticks }，含時效：junction 可能在程式執行期間才建立/移除，
-    // 沒有時效的快取會讓「已搬到別的碟」的目錄一直被算成原本的碟。
     private static readonly Dictionary<string, object[]> _volCache = new Dictionary<string, object[]>(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan VolCacheTtl = TimeSpan.FromMinutes(10);
     private static readonly object _volCacheLock = new object();
@@ -251,24 +219,6 @@ internal static class CWatch
         return name;
     }
 
-    private static string ExeOf(int pid)
-    {
-        string key = pid.ToString(CultureInfo.InvariantCulture);
-        lock (_lock)
-        {
-            string cached;
-            if (_exePathCache.TryGetValue(key, out cached)) return cached;
-        }
-        string exe = "";
-        try
-        {
-            using (Process p = Process.GetProcessById(pid)) { exe = p.MainModule.FileName; }
-        }
-        catch { }
-        lock (_lock) { _exePathCache[key] = exe; }
-        return exe;
-    }
-
     // ---------- aggregation ----------
     private sealed class FileAgg
     {
@@ -314,114 +264,14 @@ internal static class CWatch
         return a;
     }
 
-    private sealed class PendingWrite
-    {
-        public long Qpc;
-        public int Size;
-        public int Pid;
-        public string Proc;
-        public ulong Fo;
-    }
-
-    private static readonly Dictionary<ulong, PendingWrite> _pend = new Dictionary<ulong, PendingWrite>();
-    private static readonly Queue<ulong> _pendQ = new Queue<ulong>();
-    private static readonly object _pendLock = new object();
-    private const long PairWindowTicks = 200000;   // 20 毫秒（100ns 單位）
-    private static long _pairSamples;
-    private static long _pairsMerged;
-
-    // 查自己的對照表（鍵含 PID、有時效、Close 時移除）。查不到回 null。
-    private static string LookupPath(int pid, ulong fileObject)
-    {
-        if (fileObject == 0) return null;
-        string key = MapKey(pid, fileObject);
-        lock (_fileMapLock)
-        {
-            object[] entry;
-            if (_fileMap.TryGetValue(key, out entry))
-            {
-                DateTime when = new DateTime((long)entry[1], DateTimeKind.Utc);
-                if (DateTime.UtcNow - when <= FileMapTtl) return (string)entry[0];
-                _fileMap.Remove(key);
-            }
-        }
-        return null;
-    }
-
-    // FileIOInit 下每筆 I/O 會產生兩個事件（實測兩者都帶 FileObject，但不是同一個值）。
-    // 同一個 IRP 在 20 毫秒內出現兩次、大小相同 → 合併成一筆，
-    // 並優先保留「能解出檔名」的那個 FileObject。
-    private static void OnWrite(int pid, string procName, ulong fileObject, ulong irp, int ioSize, long qpc)
-    {
-        if (irp == 0) { Record(pid, procName, fileObject, ioSize); return; }
-
-        lock (_pendLock)
-        {
-            PendingWrite old;
-            bool has = _pend.TryGetValue(irp, out old);
-
-            if (has && old.Size == ioSize && Math.Abs(qpc - old.Qpc) <= PairWindowTicks)
-            {
-                _pairsMerged++;
-                if (LookupPath(old.Pid, old.Fo) == null && LookupPath(pid, fileObject) != null)
-                {
-                    old.Fo = fileObject;
-                    old.Pid = pid;
-                    old.Proc = procName;
-                }
-                if (Interlocked.Increment(ref _pairSamples) <= 8)
-                {
-                    Log("pair merged: irp=" + irp + " size=" + ioSize
-                        + " fo1=" + old.Fo + " fo2=" + fileObject
-                        + " name1=" + (LookupPath(old.Pid, old.Fo) != null)
-                        + " name2=" + (LookupPath(pid, fileObject) != null));
-                }
-                return;
-            }
-
-            if (has)
-            {
-                _pend.Remove(irp);
-                Record(old.Pid, old.Proc, old.Fo, old.Size);
-            }
-
-            _pend[irp] = new PendingWrite { Qpc = qpc, Size = ioSize, Pid = pid, Proc = procName, Fo = fileObject };
-            _pendQ.Enqueue(irp);
-            DrainPending(qpc);
-        }
-    }
-
-    // 呼叫端必須持有 _pendLock
-    private static void DrainPending(long nowQpc)
-    {
-        while (_pendQ.Count > 0)
-        {
-            ulong head = _pendQ.Peek();
-            PendingWrite h;
-            if (!_pend.TryGetValue(head, out h)) { _pendQ.Dequeue(); continue; }
-            if (nowQpc - h.Qpc <= PairWindowTicks) break;
-            _pendQ.Dequeue();
-            _pend.Remove(head);
-            Record(h.Pid, h.Proc, h.Fo, h.Size);
-        }
-    }
-
-    private static void FlushPending()
-    {
-        lock (_pendLock)
-        {
-            foreach (PendingWrite h in _pend.Values) Record(h.Pid, h.Proc, h.Fo, h.Size);
-            _pend.Clear();
-            _pendQ.Clear();
-        }
-    }
-
     private static void Record(int pid, string procName, ulong fileObject, int ioSize)
     {
         string path = null;
-        string source = "none";
+        string source = "device";
 
-        // 1) 優先用「自己記錄的 Create」：鍵含 PID，且有時效，避免指標重用造成的假路徑
+        // 只用自己記錄的 FileIOCreate 對照表（鍵含 PID、有時效、Close 時移除）。
+        // 不採信 TraceEvent 的 d.FileName：它只用 FileObject 當鍵、沒有 PID、沒有時效，
+        // 指標一被回收就會回傳別的程式的路徑。
         if (fileObject != 0)
         {
             string key = MapKey(pid, fileObject);
@@ -444,14 +294,7 @@ internal static class CWatch
             }
         }
 
-        // 2) 不再採信 TraceEvent 自己填的檔名。
-        //    它的對照表只用 FileObject 當鍵、沒有 PID、沒有時效，指標一被回收就會回傳
-        //    *別的程式的別的檔案* 路徑。實測造成 Robocopy 的 F: 流量被標成
-        //    「C:\Users\ufft4\ApplicationInsightsDiagnostics.json 1.38 GB」這種假答案。
-        //    查不到就是查不到，寧可算 (device)。
-
-        // 3) 都沒有 → 裝置／pipe／主控台，沒有檔案路徑
-        if (path == null) { path = "(device)"; source = "device"; }
+        if (path == null) path = "(device)";
 
         string volume = VolumeOfPath(path);
         string minute = DateTime.Now.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
@@ -460,7 +303,6 @@ internal static class CWatch
         lock (_lock)
         {
             if (source == "map") _resolvedMap++;
-            else if (source == "trace") _resolvedTrace++;
             else _resolvedDevice++;
 
             PidVolAgg a = GetAgg(minute, pid, proc, volume);
@@ -477,9 +319,9 @@ internal static class CWatch
                 _zeroSizeWrites++;
             }
 
-            string key = path;
+            string fkey = path;
             FileAgg f;
-            if (a.Files.TryGetValue(key, out f))
+            if (a.Files.TryGetValue(fkey, out f))
             {
                 f.Bytes += Math.Max(0, ioSize);
                 f.Ops++;
@@ -489,7 +331,7 @@ internal static class CWatch
                 f = new FileAgg();
                 f.Bytes = Math.Max(0, ioSize);
                 f.Ops = 1;
-                a.Files[key] = f;
+                a.Files[fkey] = f;
             }
             else
             {
@@ -570,9 +412,13 @@ internal static class CWatch
                 emittedOps += list[i].Value.Ops;
             }
 
-            long restBytes = a.Bytes - emittedBytes + a.Other.Bytes;
-            long restOps = a.Ops - emittedOps + a.Other.Ops;
+            // 注意：a.Bytes 已包含 a.Other.Bytes，所以這裡不能再加一次。
+            // 舊版寫成「a.Bytes - emittedBytes + a.Other.Bytes」，把 Other 算了兩次，
+            // 造成「一次寫幾千個檔」的行程（如 Robocopy）流量翻倍。
+            long restBytes = a.Bytes - emittedBytes;
+            long restOps = a.Ops - emittedOps;
             if (restBytes < 0) restBytes = 0;
+            if (restOps < 0) restOps = 0;
             if (restOps > 0 || restBytes > 0)
             {
                 sb.Append(minute).Append(',').Append(a.Pid).Append(',')
@@ -599,8 +445,8 @@ internal static class CWatch
         {
             string dir = Path.Combine(_root, @"data\state");
             if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            long evW, evC, bytes, zero, unresolved, rm, rt, rd, jr, ds, ss, os, sf, pm;
-            lock (_lock) { evW = _evWrite; evC = _evCreate; bytes = _bytesTotal; zero = _zeroSizeWrites; unresolved = _unresolvedBytes; rm = _resolvedMap; rt = _resolvedTrace; rd = _resolvedDevice; jr = Interlocked.Read(ref _junctionResolved); ds = Interlocked.Read(ref _dupesSkipped); ss = Interlocked.Read(ref _skippedStart); sf = Interlocked.Read(ref _skippedNoFo); pm = Interlocked.Read(ref _pairsMerged); os = Interlocked.Read(ref _opcodeSamples); }
+            long evW, evC, bytes, zero, unresolved, rm, rd, jr;
+            lock (_lock) { evW = _evWrite; evC = _evCreate; bytes = _bytesTotal; zero = _zeroSizeWrites; unresolved = _unresolvedBytes; rm = _resolvedMap; rd = _resolvedDevice; jr = Interlocked.Read(ref _junctionResolved); }
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("{");
             sb.AppendLine("  \"state\": \"" + state + "\",");
@@ -612,14 +458,8 @@ internal static class CWatch
             sb.AppendLine("  \"bytes_seen\": " + bytes + ",");
             sb.AppendLine("  \"bytes_device\": " + unresolved + ",");
             sb.AppendLine("  \"resolved_map\": " + rm + ",");
-            sb.AppendLine("  \"resolved_trace\": " + rt + ",");
             sb.AppendLine("  \"resolved_device\": " + rd + ",");
             sb.AppendLine("  \"junction_remapped\": " + jr + ",");
-            sb.AppendLine("  \"dupes_skipped\": " + ds + ",");
-            sb.AppendLine("  \"skipped_start\": " + ss + ",");
-            sb.AppendLine("  \"skipped_no_fileobj\": " + sf + ",");
-            sb.AppendLine("  \"pairs_merged\": " + pm + ",");
-            sb.AppendLine("  \"opcode_samples\": " + os + ",");
             sb.AppendLine("  \"writes_without_size\": " + zero);
             sb.AppendLine("}");
             File.WriteAllText(Path.Combine(dir, "collector.json"), sb.ToString(), new UTF8Encoding(false));
@@ -686,11 +526,7 @@ internal static class CWatch
             kernel.FileIOWrite += delegate(Microsoft.Diagnostics.Tracing.Parsers.Kernel.FileIOReadWriteTraceData d)
             {
                 Interlocked.Increment(ref _evWrite);
-                try
-                {
-                    if (IsStartEvent(d)) { Interlocked.Increment(ref _skippedStart); return; }
-                    OnWrite(d.ProcessID, d.ProcessName, d.FileObject, d.IrpPtr, d.IoSize, (long)(d.TimeStampRelativeMSec * 10000.0));
-                }
+                try { Record(d.ProcessID, d.ProcessName, d.FileObject, d.IoSize); }
                 catch { }
             };
 
@@ -698,7 +534,6 @@ internal static class CWatch
             {
                 try
                 {
-                    FlushPending();
                     FlushMinutes(false);
                     WriteHeartbeat("running");
                     string stopFile = Path.Combine(_root, @"data\state\collector.stop");
@@ -722,7 +557,6 @@ internal static class CWatch
             catch (Exception e) { Log("source error: " + e.Message); }
 
             flushTimer.Dispose();
-            FlushPending();
             FlushMinutes(true);
             WriteHeartbeat("stopped");
             Log("collector stopped");
@@ -751,11 +585,7 @@ internal static class CWatch
         kernel.FileIOWrite += delegate(Microsoft.Diagnostics.Tracing.Parsers.Kernel.FileIOReadWriteTraceData d)
         {
             Interlocked.Increment(ref _evWrite);
-            try
-            {
-                if (IsStartEvent(d)) { Interlocked.Increment(ref _skippedStart); return; }
-                OnWrite(d.ProcessID, d.ProcessName, d.FileObject, d.IrpPtr, d.IoSize, (long)(d.TimeStampRelativeMSec * 10000.0));
-            }
+            try { Record(d.ProcessID, d.ProcessName, d.FileObject, d.IoSize); }
             catch { }
         };
 

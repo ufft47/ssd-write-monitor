@@ -56,6 +56,7 @@
 ```
 disk-monitor\
   setup-task.ps1            建立／更新排程工作
+  clean-attrib.ps1          歸因 CSV 的清理與對帳（扣掉不可能成立的列）
   README.md                 本檔
   src\
     disk-monitor-run.ps1    排程唯一進入點（取樣 → 必要時補報告／日報）
@@ -313,6 +314,98 @@ minute,pid,process,volume,path,bytes,ops
 2. **全機同時只能有一個 kernel logger**。你若同時跑 WPA／`wpr` 錄影，collector 會啟動失敗
    並在 `logs\collector.log` 留下原因 —— 這是明確失敗，不是靜默。
 3. 檔案路徑含使用者資訊，資料只留在本機。
+
+---
+
+## 扣掉「不可能成立」的歸因列（`clean-attrib.ps1`）
+
+ETW 的 `(pid, FileObject)` 對照表有個先天的洞：`FileObject` 指標會被核心回收、再配給別的檔案。
+若新的 `FileIOCreate` 沒送達，舊對照就會把**後來的寫入算到前者頭上**。
+
+2026-11-15 實測的代價很大 —— Robocopy 在 F: 寫了 22.3 GB，卻被記到 C: 底下**五個根本不存在的路徑**：
+
+```
+9,470.8 MB  Robocopy  C:\Users\ufft4\.claude\ide
+7,576.8 MB  Robocopy  C:\Users\ufft4\AppData\Local\herdr\client\endpoints.json
+4,621.4 MB  Robocopy  C:\Users\ufft4\ApplicationInsightsDiagnostics.json
+  689.1 MB  Robocopy  C:\Users\ufft4\AppData\Roaming\BaiduNetdisk\...
+  493.5 MB  Robocopy  C:\Program Files\Git\cmd\git.EXE.Config
+```
+
+這讓 C: 的歸因總量變成物理量的 **1.9 倍**。根因（用 `FileKey` 交叉驗證）之後再修；
+現在先用**路徑可信度**把這種列扣掉，並且**明確列出扣了什麼**，不偷偷丟資料。
+
+### 分類規則
+
+| 判定 | 條件 | 算不算 |
+|---|---|---|
+| `ok` | 路徑存在且是檔案 | ✅ 可信 |
+| `ok` | 路徑不存在，但在 `Temp`/`Cache`/`Sessions`/`.tmp`/`.log` 下 | ✅ 可信（本來就會被刪） |
+| `probe` | 檔名含 `cwatch-probe` / `cwatch-mmf` / `cwatch-selftest` | ❌ 排除，單獨列出 |
+| `dir` | 路徑是目錄（目錄不是寫入目標） | ❌ 可疑 |
+| `missing` | 不存在且不是暫存路徑 | ❌ 可疑 |
+
+`probe` 那一類是**這支工具自己**寫的測試檔。不排除的話，診斷期間的名單第一名永遠是 `pwsh`。
+
+### 用法
+
+```powershell
+& 'D:\dev\disk-monitor\clean-attrib.ps1'                    # 今天
+& 'D:\dev\disk-monitor\clean-attrib.ps1' -Since '04:31'     # 只看 04:31 之後
+& 'D:\dev\disk-monitor\clean-attrib.ps1' -Date 2026-11-14 -Top 25
+```
+
+輸出有五段：各實體碟對帳、被排除的探針、C: 可信名單、C: 可疑列、**C: 熱分鐘明細**。
+
+### 對帳結果（2026-11-15 00:00–05:12 實測）
+
+| 實體碟 | 物理寫入 | 可信歸因 | 覆蓋率 | 判讀 |
+|---|---|---|---|---|
+| **F:（dev 2）** | 351.6 GB | 348.8 GB | **99%** | 大檔順序寫入，歸因可信 |
+| C:（dev 0） | 15.87 GB | 5.02 GB | 33% | 扣掉探針 815 MB 後 **33%** |
+| D:（dev 3） | 19.43 GB | 23.43 GB | 121% | **不可用**，見下 |
+
+**只有 04:31 之後的資料可信。** 用 `-Since 04:31` 限定的話：F: **98–99%**、C: **12–14%**、D: **6%**。
+腳本會在覆蓋率 >105% 時直接印出警告，因為那在物理上不可能。
+
+### 三個必須知道的限制
+
+1. **C: 只覆蓋 12–14%，但這不是 bug。** 安靜量測（05:06–05:10，我不動手）：
+   C: 物理 25.4 MB / 歸因 3.6 MB。剩下的是**不經過使用者模式手柄**的寫入 ——
+   登錄檔 hive（registry manager 不是 FileIO）、NTFS 日誌與 MFT、記憶體映射的髒頁回寫。
+   原理上無法歸因到程式，只能當成基線。
+2. **D: 不能對帳，因為 Docker 在跑。** 容器的 I/O 全部發生在
+   `D:\docker\wsl\DockerDesktopWSL\data\ext4.vhdx`（38.5 GB）**裡面**；
+   主機端只看到 VM 對那個 vhdx 的寫入，而 `attrib` CSV 裡 **`vhdx` 一筆都沒有**。
+   D: 的常態缺口約 15 MB/min，就是這個。
+3. **`(device)` 是舊版的桶。** 舊版 collector 會另外寫 `volume=(device)` 的列（本日 240.77 GB），
+   它不屬於任何磁碟區，新版已不再產生。
+
+### 真正的結論：C: 是被「幾次尖峰」撐大的，不是被常態寫入
+
+用物理量（不依賴任何歸因）拆解的形狀：
+
+```
+合計             15.87 GB
+中位數/分        11.5 MB   ← 常態基線（≈16 GB/日）
+P90/分           115.8 MB
+平均/分          52.1 MB
+熱分鐘(>=200MB)  13 個，合計 7.23 GB（佔 46%）
+```
+
+**一半的 C: 寫入集中在 13 分鐘裡。** 而這些尖峰幾乎都能指名：
+
+| 分鐘 | 物理寫入 | 主要來源 |
+|---|---|---|
+| 01:31 | 1,578 MB | `icarus` 1,533 MB（AVG 掃描引擎） |
+| 01:35 | 1,341 MB | `AdODIS-installer` 1,038 MB（Autodesk 更新器） |
+| 03:52 | 1,301 MB | `AdODIS-installer`（+ `ADPSDK\JSON\Upload`） |
+| 00:38 | 420 MB | `System`（`C:\ProgramData`） |
+| 02:36 / 02:37 | 385 / 374 MB | `AVGSvc`（`ipwl.cache`） |
+| 01:41 | 337 MB | `System`（`Autodesk\ADPSDK\JSON\Upload`） |
+
+以全天可信歸因排名，前兩名各佔 36%：**`AdODIS-installer` 1.87 GB、`icarus` 1.86 GB**。
+換句話說，**想砍 C: 的寫入，先處理 AVG 與 Autodesk 更新器**，投報率遠高於逐一追查常態寫入。
 
 ---
 

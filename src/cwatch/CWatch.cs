@@ -1,4 +1,4 @@
-// CWatch collector - per-process / per-volume write attribution via ETW kernel FileIO.
+﻿// CWatch collector - per-process / per-volume write attribution via ETW kernel FileIO.
 // Target: .NET Framework 4.8, compiled with csc (C# 5 syntax only).
 //
 // Modes:
@@ -59,6 +59,7 @@ internal static class CWatch
     private static long _nameEvents;
     private static long _rundownEntries;
     private static long _unresolvedOps;
+    private static long _unresolvedNoKey;
     // 落地層（無法解析路徑）的位元組按程式統計，只寫進心跳，用來解釋殘差。
     private static readonly Dictionary<string, long> _unresolvedByProc = new Dictionary<string, long>();
 
@@ -334,7 +335,6 @@ internal static class CWatch
     private static void Record(int pid, string procName, ulong fileObject, ulong fileKey, int ioSize)
     {
         string path = null;
-        string source = null;
 
         // 1) 自己記錄的 FileIOCreate 對照表（鍵含 PID、有時效、Close 時移除）。
         //    不採信 TraceEvent 的 d.FileName：它只用 FileObject 當鍵、沒有 PID、沒有時效，
@@ -351,7 +351,6 @@ internal static class CWatch
                     if (DateTime.UtcNow - when <= FileMapTtl)
                     {
                         path = (string)entry[0];
-                        source = "map";
                     }
                     else
                     {
@@ -361,25 +360,24 @@ internal static class CWatch
             }
         }
 
-        // 2) FileKey 對照表（檔案身分，同一檔案的所有手柄共用）。
-        //    補上 session 開始前就已經開好的手柄。
-        if (path == null && fileKey != 0)
-        {
-            path = LookupFileKey(fileKey);
-            if (path != null) source = "filekey";
-        }
-
-        // 3) 解不到路徑 = 「落地層」事件（writeback / paging I/O）或核心內部寫入
-        //    （登錄檔 hive、NTFS 日誌與 MFT、pagefile）。
-        //    實測（2026-11-15，三次對照實驗）：一筆緩衝式寫入會產生兩個事件 ——
-        //    邏輯層解得到路徑、落地層解不到，而物理碟只算一次。若把落地層也加進
-        //    總量，數字就會變成物理量的 2 倍。所以它只能留下計數供診斷。
+        // 2) 只有「應用程式自己的手柄」算邏輯層。實測（2026-11-15，受控探針）：
+        //    一筆緩衝式 WriteFile 會產生兩個 FileIOWrite —— 應用程式手柄那個
+        //    （FileIOCreate 認得）與落地層那個（writeback / paging，FileObject
+        //    不是應用程式手柄）。用 FileKey 也會把落地層解出來，但那樣會讓
+        //    100 MB 的寫入被記成 201 MB，所以 FileKey 只拿來「診斷」，不計量。
         if (path == null)
         {
+            bool keyKnown = false;
+            if (fileKey != 0 && LookupFileKey(fileKey) != null)
+            {
+                keyKnown = true;
+                Interlocked.Increment(ref _resolvedKey);
+            }
             string anon = ProcNameOf(pid, procName);
             lock (_lock)
             {
                 _unresolvedOps++;
+                if (!keyKnown) _unresolvedNoKey++;
                 if (ioSize > 0)
                 {
                     _unresolvedBytes += ioSize;
@@ -393,7 +391,7 @@ internal static class CWatch
         }
 
         // 這次解到的路徑，順手補進 FileKey 表，讓同一個檔案的其他手柄也能解析。
-        if (fileKey != 0 && source == "map") LearnFileKey(fileKey, path);
+        if (fileKey != 0) LearnFileKey(fileKey, path);
 
         string volume = VolumeOfPath(path);
         string minute = DateTime.Now.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
@@ -401,8 +399,7 @@ internal static class CWatch
 
         lock (_lock)
         {
-            if (source == "filekey") _resolvedKey++;
-            else _resolvedMap++;
+            _resolvedMap++;
 
             PidVolAgg a = GetAgg(minute, pid, proc, volume);
             a.Ops++;
@@ -556,13 +553,13 @@ internal static class CWatch
         {
             string dir = Path.Combine(_root, @"data\state");
             if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            long evW, evC, bytes, zero, unresolved, unsolvedOps, rm, rk, ne, rundo, jr;
+            long evW, evC, bytes, zero, unresolved, unsolvedOps, unsolvedNoKey, rm, rk, ne, rundo, jr;
             List<KeyValuePair<string, long>> topUnres = new List<KeyValuePair<string, long>>();
             lock (_lock)
             {
                 evW = _evWrite; evC = _evCreate; bytes = _bytesTotal; zero = _zeroSizeWrites;
-                unresolved = _unresolvedBytes; unsolvedOps = _unresolvedOps;
-                rm = _resolvedMap; rk = _resolvedKey;
+                unresolved = _unresolvedBytes; unsolvedOps = _unresolvedOps; unsolvedNoKey = _unresolvedNoKey;
+                rm = _resolvedMap; rk = Interlocked.Read(ref _resolvedKey);
                 ne = Interlocked.Read(ref _nameEvents); rundo = Interlocked.Read(ref _rundownEntries);
                 jr = Interlocked.Read(ref _junctionResolved);
                 topUnres.AddRange(_unresolvedByProc);
@@ -582,6 +579,7 @@ internal static class CWatch
             sb.AppendLine("  \"bytes_seen\": " + bytes + ",");
             sb.AppendLine("  \"bytes_unresolved\": " + unresolved + ",");
             sb.AppendLine("  \"ops_unresolved\": " + unsolvedOps + ",");
+            sb.AppendLine("  \"unresolved_no_filekey\": " + unsolvedNoKey + ",");
             sb.AppendLine("  \"resolved_map\": " + rm + ",");
             sb.AppendLine("  \"resolved_filekey\": " + rk + ",");
             sb.AppendLine("  \"name_events\": " + ne + ",");

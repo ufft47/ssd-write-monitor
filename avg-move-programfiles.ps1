@@ -96,11 +96,13 @@ function Say([string]$m, [string]$color = 'Gray') {
     $script:step++
     $line = "  [$script:step] $m"
     Write-Host $line -ForegroundColor $color
-    Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8
+    # 寫日誌失敗不可以影響主流程（實測安全模式下曾出現
+    # Add-Content: 資料流是不可讀取的，屬非終止錯誤，但會嚇到使用者）
+    try { Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8 -ErrorAction Stop } catch { }
 }
 function SayRaw([string]$m, [string]$color = 'Gray') {
     Write-Host $m -ForegroundColor $color
-    Add-Content -LiteralPath $logFile -Value $m -Encoding UTF8
+    try { Add-Content -LiteralPath $logFile -Value $m -Encoding UTF8 -ErrorAction Stop } catch { }
 }
 function SizeOf([string]$p) {
     if (-not (Test-Path -LiteralPath $p)) { return [int64]0 }
@@ -305,12 +307,46 @@ if ($Move) {
         elseif ($locked) { '是（AVG 仍在作用）' } else { '否（可以搬）' })) `
         $(if ($locked -eq $false) { 'Green' } elseif ($null -eq $locked) { 'Yellow' } else { 'Red' })
 
-    if ((-not $DryRun) -and ($procs.Count -gt 0 -or $running.Count -gt 0 -or $drvRun.Count -gt 0 -or $locked -ne $false)) {
+    if ((-not $DryRun) -and ($procs.Count -gt 0 -or $running.Count -gt 0 -or $locked -ne $false)) {
         SayRaw ''
-        SayRaw 'AVG 仍在執行（行程／服務／驅動任一項成立）或檔案仍被鎖住，搬移會失敗。' 'Red'
+        SayRaw 'AVG 仍在執行（行程／服務）或檔案仍被鎖住，搬移會失敗。' 'Red'
         SayRaw '已中止，沒有動任何東西。' 'Red'
         SayRaw '請確認真的進入了安全模式（不是「正常開機」），必要時用「安全模式含網路功能」。' 'Yellow'
         exit 3
+    }
+
+    # 仍在載入的驅動：只警告，不阻擋。
+    # 實測（2026-11-15 07:35，安全模式 Fail-safe boot）：avgArDisk（StartMode=Boot）
+    # 在安全模式下仍會被核心載入，但「獨佔開檔測試」顯示 AVG 的檔案並沒有被鎖住。
+    # 真正的判準是下方「改名探針」——直接問作業系統「這個目錄能不能改名」。
+    if ($drvRun.Count -gt 0) {
+        SayRaw ''
+        SayRaw ("  注意：下列 AVG 驅動仍在載入（開機型驅動在安全模式仍會載入）：{0}" -f ($drvRun -join ', ')) 'Yellow'
+        SayRaw '  它們沒有握住 AVG 的檔案（上面測試已證明），所以不阻擋；下一步用改名探針確認。' 'DarkGray'
+    }
+
+    # 改名探針：唯一能直接回答「目錄能不能改名」的實驗，而且立刻可逆。
+    if (-not $DryRun) {
+        $leaf = Split-Path $src -Leaf
+        $parent = Split-Path $src -Parent
+        $probeName = "$leaf.dm-renameprobe"
+        $probePath = Join-Path $parent $probeName
+        Say ("改名探針：{0} -> {1}（隨即改回）" -f $leaf, $probeName)
+        try {
+            Rename-Item -LiteralPath $src -NewName $probeName -ErrorAction Stop
+            Rename-Item -LiteralPath $probePath -NewName $leaf -ErrorAction Stop
+            Say '  改名成功並已改回 → 可以搬' 'Green'
+        } catch {
+            Say ("  改名失敗：{0}" -f $_.Exception.Message) 'Red'
+            if (Test-Path -LiteralPath $probePath) {
+                SayRaw ''
+                SayRaw ("  注意：目錄目前名稱是 {0}，請手動改回：" -f $probeName) 'Red'
+                SayRaw ("    Rename-Item -LiteralPath '{0}' -NewName '{1}'" -f $probePath, $leaf) 'Red'
+            }
+            SayRaw ''
+            SayRaw '  已中止，沒有動任何其他東西。' 'Red'
+            exit 4
+        }
     }
 
     if (Test-Path -LiteralPath $dst) {

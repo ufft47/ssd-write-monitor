@@ -53,6 +53,40 @@ internal static class CWatch
     private static long _resolvedTrace;
     private static long _resolvedDevice;
 
+    // FileIOInit 會讓每筆 I/O 產生「開始 + 完成」兩個事件（TraceEvent 文件明載）。
+    // 實測：拿掉 FileIOInit 就完全收不到 FileIOWrite，所以必須開著，
+    // 改成只採計「非 Start」的那一個，另外用極短窗的 IRP 比對當保險。
+    private static readonly Dictionary<ulong, long[]> _irpSeen = new Dictionary<ulong, long[]>();
+    private static readonly object _irpLock = new object();
+    private static long _dupesSkipped;
+    private static long _skippedStart;
+    private static long _opcodeSamples;
+    private const long DupeWindowTicks = 30000;   // 3 毫秒（100ns 單位）
+
+    private static void PruneIrp(long nowQpc)
+    {
+        List<ulong> dead = null;
+        foreach (KeyValuePair<ulong, long[]> kv in _irpSeen)
+        {
+            if (nowQpc - kv.Value[0] > 10000000)   // 1 秒前的都清掉
+            {
+                if (dead == null) dead = new List<ulong>();
+                dead.Add(kv.Key);
+            }
+        }
+        if (dead != null)
+        {
+            for (int i = 0; i < dead.Count; i++) _irpSeen.Remove(dead[i]);
+        }
+    }
+
+    private static bool IsStartEvent(Microsoft.Diagnostics.Tracing.TraceEvent e)
+    {
+        if (e.Opcode == Microsoft.Diagnostics.Tracing.TraceEventOpcode.Start) return true;
+        string n = e.OpcodeName;
+        return n != null && n.Equals("Start", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string MapKey(int pid, ulong fileObject)
     {
         return pid.ToString(CultureInfo.InvariantCulture) + "|" + fileObject.ToString(CultureInfo.InvariantCulture);
@@ -279,8 +313,28 @@ internal static class CWatch
         return a;
     }
 
-    private static void Record(int pid, string procName, ulong fileObject, string fileName, int ioSize)
+    private static void Record(int pid, string procName, ulong fileObject, string fileName, int ioSize, ulong irp, long qpc)
     {
+        // 保險用的去重：同一 irp + 同檔案物件 + 同大小，且相距 3 毫秒內 → 視為同一筆。
+        // 視窗必須極短：核心會快速回收 IRP 位址，2 秒窗實測會把 96% 的真實寫入誤判成重複。
+        if (irp != 0)
+        {
+            lock (_irpLock)
+            {
+                long[] prev;
+                if (_irpSeen.TryGetValue(irp, out prev)
+                    && Math.Abs(qpc - prev[0]) <= DupeWindowTicks
+                    && prev[1] == (long)fileObject
+                    && prev[2] == (long)ioSize)
+                {
+                    _dupesSkipped++;
+                    return;
+                }
+                if (_irpSeen.Count > 200000) PruneIrp(qpc);
+                _irpSeen[irp] = new long[] { qpc, (long)fileObject, (long)ioSize };
+            }
+        }
+
         string path = null;
         string source = "none";
 
@@ -307,8 +361,10 @@ internal static class CWatch
             }
         }
 
-        // 2) 其次用 TraceEvent 自己填的檔名（它的對照表只用指標當鍵，可能是舊路徑）
-        if (path == null)
+        // 2) 其次用 TraceEvent 自己填的檔名。
+        //    但只在事件「有 FileObject」時才採信：沒有 FileObject 的事件，函式庫會回傳
+        //    *別的檔案* 的舊路徑，實測造成 Robocopy 的 F: 流量被誤標成 C:/D:。
+        if (path == null && fileObject != 0)
         {
             string n = NormalizePath(fileName);
             if (n != null) { path = n; source = "trace"; }
@@ -463,8 +519,8 @@ internal static class CWatch
         {
             string dir = Path.Combine(_root, @"data\state");
             if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            long evW, evC, bytes, zero, unresolved, rm, rt, rd, jr;
-            lock (_lock) { evW = _evWrite; evC = _evCreate; bytes = _bytesTotal; zero = _zeroSizeWrites; unresolved = _unresolvedBytes; rm = _resolvedMap; rt = _resolvedTrace; rd = _resolvedDevice; jr = Interlocked.Read(ref _junctionResolved); }
+            long evW, evC, bytes, zero, unresolved, rm, rt, rd, jr, ds, ss, os;
+            lock (_lock) { evW = _evWrite; evC = _evCreate; bytes = _bytesTotal; zero = _zeroSizeWrites; unresolved = _unresolvedBytes; rm = _resolvedMap; rt = _resolvedTrace; rd = _resolvedDevice; jr = Interlocked.Read(ref _junctionResolved); ds = Interlocked.Read(ref _dupesSkipped); ss = Interlocked.Read(ref _skippedStart); os = Interlocked.Read(ref _opcodeSamples); }
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("{");
             sb.AppendLine("  \"state\": \"" + state + "\",");
@@ -479,6 +535,9 @@ internal static class CWatch
             sb.AppendLine("  \"resolved_trace\": " + rt + ",");
             sb.AppendLine("  \"resolved_device\": " + rd + ",");
             sb.AppendLine("  \"junction_remapped\": " + jr + ",");
+            sb.AppendLine("  \"dupes_skipped\": " + ds + ",");
+            sb.AppendLine("  \"skipped_start\": " + ss + ",");
+            sb.AppendLine("  \"opcode_samples\": " + os + ",");
             sb.AppendLine("  \"writes_without_size\": " + zero);
             sb.AppendLine("}");
             File.WriteAllText(Path.Combine(dir, "collector.json"), sb.ToString(), new UTF8Encoding(false));
@@ -545,7 +604,16 @@ internal static class CWatch
             kernel.FileIOWrite += delegate(Microsoft.Diagnostics.Tracing.Parsers.Kernel.FileIOReadWriteTraceData d)
             {
                 Interlocked.Increment(ref _evWrite);
-                try { Record(d.ProcessID, d.ProcessName, d.FileObject, d.FileName, d.IoSize); }
+                try
+                {
+                    if (_opcodeSamples < 6)
+                    {
+                        long n = Interlocked.Increment(ref _opcodeSamples);
+                        if (n <= 6) Log("event sample: opcode=" + (int)d.Opcode + "/" + d.OpcodeName + " size=" + d.IoSize + " fo=" + d.FileObject);
+                    }
+                    if (IsStartEvent(d)) { Interlocked.Increment(ref _skippedStart); return; }
+                    Record(d.ProcessID, d.ProcessName, d.FileObject, d.FileName, d.IoSize, d.IrpPtr, (long)(d.TimeStampRelativeMSec * 10000.0));
+                }
                 catch { }
             };
 
@@ -604,7 +672,11 @@ internal static class CWatch
         kernel.FileIOWrite += delegate(Microsoft.Diagnostics.Tracing.Parsers.Kernel.FileIOReadWriteTraceData d)
         {
             Interlocked.Increment(ref _evWrite);
-            try { Record(d.ProcessID, d.ProcessName, d.FileObject, d.FileName, d.IoSize); }
+            try
+            {
+                if (IsStartEvent(d)) { Interlocked.Increment(ref _skippedStart); return; }
+                Record(d.ProcessID, d.ProcessName, d.FileObject, d.FileName, d.IoSize, d.IrpPtr, (long)(d.TimeStampRelativeMSec * 10000.0));
+            }
             catch { }
         };
 

@@ -55,11 +55,78 @@ internal static class CWatch
     private const int MaxFileMapEntries = 50000;
     private static readonly TimeSpan FileMapTtl = TimeSpan.FromMinutes(30);
     private static long _resolvedMap;
-    private static long _resolvedDevice;
+    private static long _resolvedKey;
+    private static long _nameEvents;
+    private static long _rundownEntries;
+    private static long _unresolvedOps;
+    // 落地層（無法解析路徑）的位元組按程式統計，只寫進心跳，用來解釋殘差。
+    private static readonly Dictionary<string, long> _unresolvedByProc = new Dictionary<string, long>();
+
+    // FileKey -> 檔案路徑。FileKey 是「檔案身分」（同一個檔案的多個手柄共用同一個值），
+    // 由 FileIOName / FileIOFileRundown 提供。它補的是 FileIOCreate 看不到的那一段：
+    // session 開始前就已經開好的手柄（登錄檔 hive、pagefile、系統記錄檔…）。
+    private static readonly Dictionary<ulong, object[]> _fileKeyMap = new Dictionary<ulong, object[]>();
+    private static readonly object _fileKeyLock = new object();
+    private const int MaxFileKeyEntries = 100000;
+    private static readonly TimeSpan FileKeyTtl = TimeSpan.FromMinutes(30);
 
     private static string MapKey(int pid, ulong fileObject)
     {
         return pid.ToString(CultureInfo.InvariantCulture) + "|" + fileObject.ToString(CultureInfo.InvariantCulture);
+    }
+
+    // FileIOName / FileIOFileRundown 給的名字常是「裝置路徑」
+    // （\Device\HarddiskVolume3\Users\...），先換回磁碟代號，
+    // 這樣 CSV 的 path 欄位才可讀，junction 解析也才作用得上。
+    private static string ToDosPath(string p)
+    {
+        if (string.IsNullOrEmpty(p)) return p;
+        if (!p.StartsWith(@"\Device\", StringComparison.OrdinalIgnoreCase)) return p;
+        int next = p.IndexOf('\\', 8);
+        if (next <= 0) return p;
+        string dev = p.Substring(0, next);
+        string letter;
+        if (_deviceMap.TryGetValue(dev, out letter)) return letter + p.Substring(next);
+        return p;
+    }
+
+    // 呼叫端必須持有 _fileKeyLock
+    private static void EvictExpiredFileKeys()
+    {
+        DateTime cutoff = DateTime.UtcNow - FileKeyTtl;
+        List<ulong> dead = new List<ulong>();
+        foreach (KeyValuePair<ulong, object[]> kv in _fileKeyMap)
+        {
+            if (new DateTime((long)kv.Value[1], DateTimeKind.Utc) < cutoff) dead.Add(kv.Key);
+        }
+        foreach (ulong k in dead) _fileKeyMap.Remove(k);
+    }
+
+    private static void LearnFileKey(ulong fileKey, string path)
+    {
+        if (fileKey == 0 || string.IsNullOrEmpty(path)) return;
+        path = ToDosPath(path);
+        lock (_fileKeyLock)
+        {
+            if (_fileKeyMap.Count >= MaxFileKeyEntries) EvictExpiredFileKeys();
+            if (_fileKeyMap.Count >= MaxFileKeyEntries) _fileKeyMap.Clear();
+            _fileKeyMap[fileKey] = new object[] { path, DateTime.UtcNow.Ticks };
+        }
+    }
+
+    private static string LookupFileKey(ulong fileKey)
+    {
+        lock (_fileKeyLock)
+        {
+            object[] entry;
+            if (!_fileKeyMap.TryGetValue(fileKey, out entry)) return null;
+            if (DateTime.UtcNow - new DateTime((long)entry[1], DateTimeKind.Utc) > FileKeyTtl)
+            {
+                _fileKeyMap.Remove(fileKey);
+                return null;
+            }
+            return (string)entry[0];
+        }
     }
 
     // 呼叫端必須持有 _fileMapLock
@@ -264,14 +331,14 @@ internal static class CWatch
         return a;
     }
 
-    private static void Record(int pid, string procName, ulong fileObject, int ioSize)
+    private static void Record(int pid, string procName, ulong fileObject, ulong fileKey, int ioSize)
     {
         string path = null;
-        string source = "device";
+        string source = null;
 
-        // 只用自己記錄的 FileIOCreate 對照表（鍵含 PID、有時效、Close 時移除）。
-        // 不採信 TraceEvent 的 d.FileName：它只用 FileObject 當鍵、沒有 PID、沒有時效，
-        // 指標一被回收就會回傳別的程式的路徑。
+        // 1) 自己記錄的 FileIOCreate 對照表（鍵含 PID、有時效、Close 時移除）。
+        //    不採信 TraceEvent 的 d.FileName：它只用 FileObject 當鍵、沒有 PID、沒有時效，
+        //    指標一被回收就會回傳別的程式的路徑。
         if (fileObject != 0)
         {
             string key = MapKey(pid, fileObject);
@@ -294,7 +361,39 @@ internal static class CWatch
             }
         }
 
-        if (path == null) path = "(device)";
+        // 2) FileKey 對照表（檔案身分，同一檔案的所有手柄共用）。
+        //    補上 session 開始前就已經開好的手柄。
+        if (path == null && fileKey != 0)
+        {
+            path = LookupFileKey(fileKey);
+            if (path != null) source = "filekey";
+        }
+
+        // 3) 解不到路徑 = 「落地層」事件（writeback / paging I/O）或核心內部寫入
+        //    （登錄檔 hive、NTFS 日誌與 MFT、pagefile）。
+        //    實測（2026-11-15，三次對照實驗）：一筆緩衝式寫入會產生兩個事件 ——
+        //    邏輯層解得到路徑、落地層解不到，而物理碟只算一次。若把落地層也加進
+        //    總量，數字就會變成物理量的 2 倍。所以它只能留下計數供診斷。
+        if (path == null)
+        {
+            string anon = ProcNameOf(pid, procName);
+            lock (_lock)
+            {
+                _unresolvedOps++;
+                if (ioSize > 0)
+                {
+                    _unresolvedBytes += ioSize;
+                    long cur;
+                    if (_unresolvedByProc.TryGetValue(anon, out cur) || _unresolvedByProc.Count < 300)
+                        _unresolvedByProc[anon] = cur + ioSize;
+                }
+                else _zeroSizeWrites++;
+            }
+            return;
+        }
+
+        // 這次解到的路徑，順手補進 FileKey 表，讓同一個檔案的其他手柄也能解析。
+        if (fileKey != 0 && source == "map") LearnFileKey(fileKey, path);
 
         string volume = VolumeOfPath(path);
         string minute = DateTime.Now.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
@@ -302,8 +401,8 @@ internal static class CWatch
 
         lock (_lock)
         {
-            if (source == "map") _resolvedMap++;
-            else _resolvedDevice++;
+            if (source == "filekey") _resolvedKey++;
+            else _resolvedMap++;
 
             PidVolAgg a = GetAgg(minute, pid, proc, volume);
             a.Ops++;
@@ -311,7 +410,6 @@ internal static class CWatch
             {
                 a.Bytes += ioSize;
                 _bytesTotal += ioSize;
-                if (volume == "(device)") _unresolvedBytes += ioSize;
             }
             else
             {
@@ -342,6 +440,19 @@ internal static class CWatch
     }
 
     // ---------- CSV ----------
+    private static string JsonStr(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        StringBuilder sb = new StringBuilder(s.Length + 8);
+        foreach (char c in s)
+        {
+            if (c == '"' || c == '\\') sb.Append('\\').Append(c);
+            else if (c == '\r' || c == '\n' || c == '\t') sb.Append(' ');
+            else sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
     private static string CsvField(string s)
     {
         if (s == null) return "";
@@ -445,8 +556,21 @@ internal static class CWatch
         {
             string dir = Path.Combine(_root, @"data\state");
             if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            long evW, evC, bytes, zero, unresolved, rm, rd, jr;
-            lock (_lock) { evW = _evWrite; evC = _evCreate; bytes = _bytesTotal; zero = _zeroSizeWrites; unresolved = _unresolvedBytes; rm = _resolvedMap; rd = _resolvedDevice; jr = Interlocked.Read(ref _junctionResolved); }
+            long evW, evC, bytes, zero, unresolved, unsolvedOps, rm, rk, ne, rundo, jr;
+            List<KeyValuePair<string, long>> topUnres = new List<KeyValuePair<string, long>>();
+            lock (_lock)
+            {
+                evW = _evWrite; evC = _evCreate; bytes = _bytesTotal; zero = _zeroSizeWrites;
+                unresolved = _unresolvedBytes; unsolvedOps = _unresolvedOps;
+                rm = _resolvedMap; rk = _resolvedKey;
+                ne = Interlocked.Read(ref _nameEvents); rundo = Interlocked.Read(ref _rundownEntries);
+                jr = Interlocked.Read(ref _junctionResolved);
+                topUnres.AddRange(_unresolvedByProc);
+            }
+            topUnres.Sort(delegate(KeyValuePair<string, long> x, KeyValuePair<string, long> y)
+            {
+                return y.Value.CompareTo(x.Value);
+            });
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("{");
             sb.AppendLine("  \"state\": \"" + state + "\",");
@@ -456,10 +580,22 @@ internal static class CWatch
             sb.AppendLine("  \"events_write\": " + evW + ",");
             sb.AppendLine("  \"events_create\": " + evC + ",");
             sb.AppendLine("  \"bytes_seen\": " + bytes + ",");
-            sb.AppendLine("  \"bytes_device\": " + unresolved + ",");
+            sb.AppendLine("  \"bytes_unresolved\": " + unresolved + ",");
+            sb.AppendLine("  \"ops_unresolved\": " + unsolvedOps + ",");
             sb.AppendLine("  \"resolved_map\": " + rm + ",");
-            sb.AppendLine("  \"resolved_device\": " + rd + ",");
+            sb.AppendLine("  \"resolved_filekey\": " + rk + ",");
+            sb.AppendLine("  \"name_events\": " + ne + ",");
+            sb.AppendLine("  \"rundown_entries\": " + rundo + ",");
             sb.AppendLine("  \"junction_remapped\": " + jr + ",");
+            StringBuilder ut = new StringBuilder();
+            int un = 0;
+            for (int i = 0; i < topUnres.Count && i < 5; i++)
+            {
+                if (un++ > 0) ut.Append(", ");
+                ut.Append("{\"process\": \"").Append(JsonStr(topUnres[i].Key))
+                  .Append("\", \"bytes\": ").Append(topUnres[i].Value).Append("}");
+            }
+            sb.AppendLine("  \"unresolved_top\": [" + ut.ToString() + "],");
             sb.AppendLine("  \"writes_without_size\": " + zero);
             sb.AppendLine("}");
             File.WriteAllText(Path.Combine(dir, "collector.json"), sb.ToString(), new UTF8Encoding(false));
@@ -523,10 +659,28 @@ internal static class CWatch
                 lock (_fileMapLock) { _fileMap.Remove(MapKey(d.ProcessID, d.FileObject)); }
             };
 
+            // FileKey -> 路徑。FileIOName 是核心在「某個檔案第一次被用到」時宣告的名字；
+            // FileIOFileRundown 是 session 開始時的傾印，補上已經開著的手柄。
+            // 兩者都帶 FileKey（檔案身分），而 FileIOWrite 也帶 FileKey，
+            // 所以即使 FileIOCreate 發生在 session 開始之前，照樣能解出檔案路徑。
+            kernel.FileIOName += delegate(Microsoft.Diagnostics.Tracing.Parsers.Kernel.FileIONameTraceData d)
+            {
+                Interlocked.Increment(ref _nameEvents);
+                try { LearnFileKey(d.FileKey, NormalizePath(d.FileName)); }
+                catch { }
+            };
+
+            kernel.FileIOFileRundown += delegate(Microsoft.Diagnostics.Tracing.Parsers.Kernel.FileIONameTraceData d)
+            {
+                Interlocked.Increment(ref _rundownEntries);
+                try { LearnFileKey(d.FileKey, NormalizePath(d.FileName)); }
+                catch { }
+            };
+
             kernel.FileIOWrite += delegate(Microsoft.Diagnostics.Tracing.Parsers.Kernel.FileIOReadWriteTraceData d)
             {
                 Interlocked.Increment(ref _evWrite);
-                try { Record(d.ProcessID, d.ProcessName, d.FileObject, d.IoSize); }
+                try { Record(d.ProcessID, d.ProcessName, d.FileObject, d.FileKey, d.IoSize); }
                 catch { }
             };
 
@@ -582,10 +736,33 @@ internal static class CWatch
             KernelTraceEventParser.Keywords.FileIOInit |
             KernelTraceEventParser.Keywords.Process);
         KernelTraceEventParser kernel = session.Source.Kernel;
+        kernel.FileIOCreate += delegate(Microsoft.Diagnostics.Tracing.Parsers.Kernel.FileIOCreateTraceData d)
+        {
+            Interlocked.Increment(ref _evCreate);
+            string p = NormalizePath(d.FileName);
+            if (p == null) return;
+            lock (_fileMapLock)
+            {
+                if (_fileMap.Count >= MaxFileMapEntries) EvictExpiredEntries();
+                _fileMap[MapKey(d.ProcessID, d.FileObject)] = new object[] { p, DateTime.UtcNow.Ticks };
+            }
+        };
+        kernel.FileIOName += delegate(Microsoft.Diagnostics.Tracing.Parsers.Kernel.FileIONameTraceData d)
+        {
+            Interlocked.Increment(ref _nameEvents);
+            try { LearnFileKey(d.FileKey, NormalizePath(d.FileName)); }
+            catch { }
+        };
+        kernel.FileIOFileRundown += delegate(Microsoft.Diagnostics.Tracing.Parsers.Kernel.FileIONameTraceData d)
+        {
+            Interlocked.Increment(ref _rundownEntries);
+            try { LearnFileKey(d.FileKey, NormalizePath(d.FileName)); }
+            catch { }
+        };
         kernel.FileIOWrite += delegate(Microsoft.Diagnostics.Tracing.Parsers.Kernel.FileIOReadWriteTraceData d)
         {
             Interlocked.Increment(ref _evWrite);
-            try { Record(d.ProcessID, d.ProcessName, d.FileObject, d.IoSize); }
+            try { Record(d.ProcessID, d.ProcessName, d.FileObject, d.FileKey, d.IoSize); }
             catch { }
         };
 
@@ -614,10 +791,13 @@ internal static class CWatch
         Thread.Sleep(500);
         FlushMinutes(true);
 
-        long total;
-        lock (_lock) { total = _bytesTotal; }
-        Console.WriteLine("events    : write=" + _evWrite);
+        long total, unres, nname, nrundown;
+        lock (_lock) { total = _bytesTotal; unres = _unresolvedBytes; }
+        nname = Interlocked.Read(ref _nameEvents);
+        nrundown = Interlocked.Read(ref _rundownEntries);
+        Console.WriteLine("events    : write=" + _evWrite + " create=" + _evCreate + " name=" + nname + " rundown=" + nrundown);
         Console.WriteLine("bytes seen: " + total.ToString("N0", CultureInfo.InvariantCulture));
+        Console.WriteLine("unresolved: " + unres.ToString("N0", CultureInfo.InvariantCulture));
 
         // verify the probe write landed in the attribution rows
         string mine = Path.GetFileName(probePath);

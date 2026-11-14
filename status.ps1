@@ -33,10 +33,9 @@ if (Test-Path -LiteralPath $hb) {
     $j = Get-Content -LiteralPath $hb -Raw -Encoding UTF8 | ConvertFrom-Json
     $age = [int]($now - [datetime]::ParseExact($j.updated, 'yyyy-MM-dd HH:mm:ss', $inv)).TotalSeconds
     $seen = [double]$j.bytes_seen
-    $dev = if ($null -ne $j.bytes_device) { [double]$j.bytes_device } else { 0 }
-    $pct = if ($seen -gt 0) { $dev / $seen * 100 } else { 0 }
+    $dev = if ($null -ne $j.bytes_unresolved) { [double]$j.bytes_unresolved } else { 0 }
     $color = if ($age -lt 90) { 'Green' } else { 'Red' }
-    Write-Host ('  collector       心跳 {0} 秒前  已見 {1}  無法歸屬 {2:N1}%（本回合）' -f $age, (Format-Bytes $seen), $pct) -ForegroundColor $color
+    Write-Host ('  collector       心跳 {0} 秒前  已歸因 {1}  落地層未計入 {2}' -f $age, (Format-Bytes $seen), (Format-Bytes $dev)) -ForegroundColor $color
 } else {
     Write-Host '  collector       心跳檔不存在（尚未啟動過）' -ForegroundColor Red
 }

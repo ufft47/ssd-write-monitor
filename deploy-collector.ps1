@@ -97,12 +97,17 @@ while ((Get-Date) -lt $deadline) {
 }
 
 if ($ok) {
-    $device = 0.0
-    if ($null -ne $j.bytes_device) { $device = [double]$j.bytes_device }
-    $pct = 0.0
-    if ([double]$j.bytes_seen -gt 0) { $pct = $device / [double]$j.bytes_seen * 100 }
-    "  心跳 OK  bytes_seen={0:N2} GB  無法歸屬={1:N1}%  events_write={2:N0}" -f ([double]$j.bytes_seen/1GB), $pct, [double]$j.events_write
-    if ($pct -gt 25) { "  [注意] 無法歸屬比例偏高，代表檔案對照表沒建起來" }
+    $unres = 0.0
+    if ($null -ne $j.bytes_unresolved) { $unres = [double]$j.bytes_unresolved }
+    $rk = 0
+    if ($null -ne $j.resolved_filekey) { $rk = [int64]$j.resolved_filekey }
+    $nd = 0
+    if ($null -ne $j.rundown_entries) { $nd = [int64]$j.rundown_entries }
+    $nn = 0
+    if ($null -ne $j.name_events) { $nn = [int64]$j.name_events }
+    "  心跳 OK  已歸因={0:N2} GB  落地層(未計入)={1:N2} GB  events_write={2:N0}" -f ([double]$j.bytes_seen/1GB), ($unres/1GB), [double]$j.events_write
+    "  FileKey: rundown={0:N0} name={1:N0} 用 FileKey 解出={2:N0}" -f $nd, $nn, $rk
+    if ($rk -eq 0 -and $nd -eq 0 -and $nn -eq 0) { "  [注意] 完全沒有 FileKey 事件（FileIOName / FileIOFileRundown），此版只靠 FileIOCreate" }
 } else {
     "  [警告] 60 秒內沒看到心跳"
     $cl = Join-Path $Root 'logs\collector.log'

@@ -27,9 +27,22 @@
 .PARAMETER RemoveLeftovers
     連 AppData 底下殘留的資料（Local\Quark、Local\QuarkUpdater、Roaming\Quark）一起刪。
     刪之前已備份到 logs\quark-backup-<時間>\。
+    **只有在程式目錄確認已移除時才會執行**（除非加 -Force）。
+
+.PARAMETER Force
+    即使程式目錄還在（卸載失敗）也照樣刪殘留資料。通常不該用。
 
 .PARAMETER DryRun
     只顯示會做什麼，不動任何東西。
+
+.NOTES
+    2026-11-15 實測：官方登錄的 `UninstallString` 是
+      unins000.exe /SILENT --brand-clouddrive /LOG
+    但這樣跑**結束碼 1、完全沒卸載**（程式目錄 2,539 MB 原封不動）。
+    改用 Inno Setup 標準參數才成功：
+      unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART --brand-clouddrive /LOG=<檔>
+    → 結束碼 0，目錄消失，C: 可用空間 124.30 GB → 127.31 GB。
+    卸載後仍留下三處懸空引用（Run 值 ×2、排程工作 ×1、HKCU\Classes ×2），本腳本會一併清掉。
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\remove-quark.ps1 -DryRun
@@ -39,6 +52,7 @@
 #>
 param(
     [switch]$RemoveLeftovers,
+    [switch]$Force,
     [switch]$DryRun
 )
 
@@ -139,11 +153,17 @@ if (-not $uninst) {
         Say ("  找不到卸載程式：{0}" -f $exePath) 'Red'
         exit 3
     }
-    Say ("  執行：{0} {1}" -f $exePath, $exeArgs)
-    $p = Start-Process -FilePath $exePath -ArgumentList $exeArgs -PassThru -ErrorAction SilentlyContinue
+    Say ("  卸載程式：{0}" -f $exePath)
+    # 實測：官方登錄的 `/SILENT --fake-silent` 會直接回結束碼 1、完全沒卸載。
+    # 改用 Inno Setup 標準參數才成功（結束碼 0）。
+    $brandArg = @()
+    if ($uninst -match '--brand-(\S+)') { $brandArg = @("--brand-$($Matches[1])") }
+    $useArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') + $brandArg + @("/LOG=$logFile.uninst")
+    Say ("  實際參數：{0}" -f ($useArgs -join ' ')) 'DarkGray'
+    $p = Start-Process -FilePath $exePath -ArgumentList $useArgs -PassThru -ErrorAction SilentlyContinue
     if ($p) {
         $done = $p.WaitForExit(600000)
-        if ($done) { Say ("  卸載程式結束，結束碼 {0}" -f $p.ExitCode) 'Green' }
+        if ($done) { Say ("  卸載程式結束，結束碼 {0}" -f $p.ExitCode) $(if ($p.ExitCode -eq 0) { 'Green' } else { 'Red' }) }
         else { Say '  卸載程式超過 10 分鐘未結束（可能跳出視窗等你確認），請手動完成後重跑' 'Yellow' }
     }
     Start-Sleep -Seconds 3
@@ -172,6 +192,30 @@ $task = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.Ta
 Say ("  排程工作       : {0}" -f $(if ($task.Count -eq 0) { '已消失' } else { ($task.TaskName -join ', ') })) `
     $(if ($task.Count -eq 0) { 'Green' } else { 'Yellow' })
 
+# ---------- 3b) 清掉懸空引用（實測卸載器不會清）----------
+Say ''
+Say '--- 清除懸空引用 ---' 'Cyan'
+$runKey = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
+$cleared = 0
+foreach ($name in @($runHit)) {
+    try { Remove-ItemProperty -Path $runKey -Name $name -ErrorAction Stop; $cleared++; Say ("  已刪除 Run 值：{0}" -f $name) 'Green' }
+    catch { Say ("  Run 值刪除失敗 {0}：{1}" -f $name, $_.Exception.Message) 'Yellow' }
+}
+foreach ($t in $task) {
+    try {
+        Unregister-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -Confirm:$false -ErrorAction Stop
+        $cleared++
+        Say ("  已移除排程工作：{0}" -f $t.TaskName) 'Green'
+    } catch { Say ("  排程工作移除失敗：{0}" -f $_.Exception.Message) 'Yellow' }
+}
+$clsHits = @(Get-ChildItem -LiteralPath 'HKCU:\SOFTWARE\Classes' -ErrorAction SilentlyContinue |
+    Where-Object { $_.PSChildName -match '^Quark' })
+foreach ($h in $clsHits) {
+    try { Remove-Item -LiteralPath $h.PSPath -Recurse -Force -ErrorAction Stop; $cleared++; Say ("  已移除 Class：{0}" -f $h.PSChildName) 'Green' }
+    catch { Say ("  Class 移除失敗 {0}" -f $h.PSChildName) 'Yellow' }
+}
+if ($cleared -eq 0) { Say '  沒有需要清除的懸空引用' 'Green' }
+
 # ---------- 4) 殘留 ----------
 Say ''
 Say '--- 殘留資料 ---' 'Cyan'
@@ -185,7 +229,11 @@ if ($left.Count -eq 0) {
     Say '  沒有殘留' 'Green'
 } else {
     foreach ($l in $left) { Say ("  {0,9:N1} MB  {1}" -f $l.MB, $l.Path) 'Yellow' }
-    if ($RemoveLeftovers) {
+    if ($RemoveLeftovers -and $stillProg -and -not $Force) {
+        Say ''
+        Say '  程式目錄還在（卸載沒有成功），**不刪殘留資料** —— 否則會留下一個裝著但沒有快取的半殘狀態。' 'Red'
+        Say '  請先讓卸載完成（看上面的結束碼與日誌），或加 -Force 強制刪除。' 'Yellow'
+    } elseif ($RemoveLeftovers) {
         foreach ($l in $left) {
             try {
                 Remove-Item -LiteralPath $l.Path -Recurse -Force -ErrorAction Stop

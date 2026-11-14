@@ -519,6 +519,9 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy',
 | `avg-move-programfiles.ps1` | `C:\Program Files\AVG` → D: + junction | **是**（互鎖） | 是（`-Revert`） |
 | `avg-try-stop.ps1` | 診斷「只關服務能不能解鎖」 | 否 | 是（自動復原） |
 | `remove-avg-browser.ps1` | 移除 AVG Secure Browser + 清孤兒 junction | 否 | 否（需重裝） |
+| `remove-quark.ps1` | 移除夸克网盘 + 清懸空引用 | 否 | 否（需重裝） |
+| `move-asus-ime-log.ps1` | 停 ASUS IME 的 ETW 追蹤（`-StopTrace`）或把 log 搬 D: | 否 | 是（`-Revert`） |
+| `move-pagefile.ps1` | 主分頁檔搬到 D:（C: 省 22 GB） | 否 | 是（`-Revert`） |
 
 ### 建議順序
 
@@ -576,7 +579,7 @@ profile 裡有 `Default\Bookmarks`（2024-05）與 `Default\Login Data`（2025-1
 | **ASUS IME ETW 追蹤**（躲在 `System` 裡） | **0.9–1.5 GB** | 258 MB | `logman stop`（已執行，寫入 0） | **已生效，但不持久** |
 | `taskhostw` → `WebCacheV01.dat` | 0.5 GB | — | 不動（Windows 管理） | — |
 | `brave`、Docker、OneDrive、Dropbox | 各 0.1–0.3 GB | — | 不動 | — |
-| **夸克网盘（Quark 4.6.5.580）** | 0.002 GB | **3.09 GB** | 待決定（兩個開機自啟項） | 未處理 |
+| **夸克网盘（Quark 4.6.5.580）** | 0.002 GB | **3.09 GB** | **已移除** | **完成，C: +3.01 GB** |
 
 ### 三個校正（都是實測，不是推論）
 
@@ -618,6 +621,32 @@ profile 裡有 `Default\Bookmarks`（2024-05）與 `Default\Login Data`（2025-1
 
 也就是說它落在「核心內部寫入」（NTFS 日誌／MFT／mapped page 回寫）這一類，
 **原理上不會有行程歸因** —— 與整天 10 GB 殘差同源。
+
+### 校正 4：官方卸載字串可能是壞的，要驗證「結果」不是「結束碼」
+
+夸克网盘的登錄檔寫的卸載指令是：
+
+```
+unins000.exe /SILENT --brand-clouddrive /LOG
+```
+
+照它跑 → **結束碼 1、程式目錄 2,539 MB 原封不動、登錄項目與 Run 值全都還在**。
+改用 Inno Setup 標準參數才成功（結束碼 0）：
+
+```
+unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART --brand-clouddrive /LOG=<檔案>
+```
+
+而且**成功卸載後仍留下三處懸空引用**（指向已刪除的檔案）：
+
+| 類型 | 內容 |
+|---|---|
+| `HKCU\...\Run` | `quark`、`QuarkUpdaterTaskUser1.0.0.18` |
+| 排程工作 | `\QuarkUpdaterUser\QuarkUpdater\QuarkUpdaterTaskUser...` |
+| `HKCU\SOFTWARE\Classes` | `QuarkHTM`、`QuarkUpdaterUpdate.Update3WebUser` |
+
+→ `remove-quark.ps1` 已把「驗證目錄是否真的消失」當成前置條件：
+**卸載失敗時不會刪殘留資料**（否則會留下「裝著但沒有快取」的半殘狀態），要覆寫得加 `-Force`。
 
 ---
 

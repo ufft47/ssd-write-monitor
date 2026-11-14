@@ -424,6 +424,11 @@ P90/分           115.8 MB
 3. **`ConvertTo-Json -InputObject` 不要直接吃 `List[object]`**（丟 ArgumentException），先 `.ToArray()`。
 4. **PowerShell 變數不分大小寫**：`$now`（時間）與 `$Now`（開關）是同一個變數。
    所以「即時檢視」的開關叫 `-NowView`。
+5. **`attrib` CSV 的 `minute` 欄位是完整時間戳**（`2026-11-15 05:45`），不是 `HH:mm`。
+   拿 `'05:14'` 去比會得到 `'2026-...' < '05:14'` 永遠為假 —— **篩選等於沒做，算出來是全天數字**。
+   實際踩到：用臨時腳本算「05:14 之後 taskhostw 寫了多少」，得到 254.7 MB；
+   正確值是 24.5 MB（`clean-attrib.ps1` 的 32.9 MB 含同目錄其他檔案）。
+   臨時分析要跟 `clean-attrib.ps1` 對帳，兩者差在「探針列」與「暫存路徑」才算合理差異。
 
 ---
 
@@ -480,8 +485,7 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy',
 ### 安全網
 
 - **三重前置檢查**：AVG 行程數、AVG 服務狀態、`sc.exe` 驅動狀態、以及「獨佔開檔測試是否仍被鎖」。
-  任一項成立就中止，且**不改動任何東西**。開機狀態判定失敗（WMI 無回應）時不阻擋，改由這四項把關。
-- **複製先行**：`robocopy /E /COPY:DAT /XJ`（不用 `/MOVE`），逐檔比對 missing 與 size-diff 皆為 0 才動來源。
+  任一項成立就中止，且**不改動任何東西**。開機狀態判定失敗（WMI 無回應）時不阻擋，改由這四項把關。- **複製先行**：`robocopy /E /COPY:DAT /XJ`（不用 `/MOVE`），逐檔比對 missing 與 size-diff 皆為 0 才動來源。
 - **原件只改名**（`AVG.bak-<時間>`），**不刪除**；改名失敗或落地測試失敗都會自動回滾。
 - **刪 junction 只用 `cmd /c rmdir`**，不加 `/s`（會跟進刪掉 D: 上的目標）。
 

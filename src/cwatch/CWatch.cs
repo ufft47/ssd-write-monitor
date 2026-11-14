@@ -314,28 +314,110 @@ internal static class CWatch
         return a;
     }
 
-    private static void Record(int pid, string procName, ulong fileObject, string fileName, int ioSize, ulong irp, long qpc)
+    private sealed class PendingWrite
     {
-        // 保險用的去重：同一 irp + 同檔案物件 + 同大小，且相距 3 毫秒內 → 視為同一筆。
-        // 視窗必須極短：核心會快速回收 IRP 位址，2 秒窗實測會把 96% 的真實寫入誤判成重複。
-        if (irp != 0)
+        public long Qpc;
+        public int Size;
+        public int Pid;
+        public string Proc;
+        public ulong Fo;
+    }
+
+    private static readonly Dictionary<ulong, PendingWrite> _pend = new Dictionary<ulong, PendingWrite>();
+    private static readonly Queue<ulong> _pendQ = new Queue<ulong>();
+    private static readonly object _pendLock = new object();
+    private const long PairWindowTicks = 200000;   // 20 毫秒（100ns 單位）
+    private static long _pairSamples;
+    private static long _pairsMerged;
+
+    // 查自己的對照表（鍵含 PID、有時效、Close 時移除）。查不到回 null。
+    private static string LookupPath(int pid, ulong fileObject)
+    {
+        if (fileObject == 0) return null;
+        string key = MapKey(pid, fileObject);
+        lock (_fileMapLock)
         {
-            lock (_irpLock)
+            object[] entry;
+            if (_fileMap.TryGetValue(key, out entry))
             {
-                long[] prev;
-                if (_irpSeen.TryGetValue(irp, out prev)
-                    && Math.Abs(qpc - prev[0]) <= DupeWindowTicks
-                    && prev[1] == (long)fileObject
-                    && prev[2] == (long)ioSize)
-                {
-                    _dupesSkipped++;
-                    return;
-                }
-                if (_irpSeen.Count > 200000) PruneIrp(qpc);
-                _irpSeen[irp] = new long[] { qpc, (long)fileObject, (long)ioSize };
+                DateTime when = new DateTime((long)entry[1], DateTimeKind.Utc);
+                if (DateTime.UtcNow - when <= FileMapTtl) return (string)entry[0];
+                _fileMap.Remove(key);
             }
         }
+        return null;
+    }
 
+    // FileIOInit 下每筆 I/O 會產生兩個事件（實測兩者都帶 FileObject，但不是同一個值）。
+    // 同一個 IRP 在 20 毫秒內出現兩次、大小相同 → 合併成一筆，
+    // 並優先保留「能解出檔名」的那個 FileObject。
+    private static void OnWrite(int pid, string procName, ulong fileObject, ulong irp, int ioSize, long qpc)
+    {
+        if (irp == 0) { Record(pid, procName, fileObject, ioSize); return; }
+
+        lock (_pendLock)
+        {
+            PendingWrite old;
+            bool has = _pend.TryGetValue(irp, out old);
+
+            if (has && old.Size == ioSize && Math.Abs(qpc - old.Qpc) <= PairWindowTicks)
+            {
+                _pairsMerged++;
+                if (LookupPath(old.Pid, old.Fo) == null && LookupPath(pid, fileObject) != null)
+                {
+                    old.Fo = fileObject;
+                    old.Pid = pid;
+                    old.Proc = procName;
+                }
+                if (Interlocked.Increment(ref _pairSamples) <= 8)
+                {
+                    Log("pair merged: irp=" + irp + " size=" + ioSize
+                        + " fo1=" + old.Fo + " fo2=" + fileObject
+                        + " name1=" + (LookupPath(old.Pid, old.Fo) != null)
+                        + " name2=" + (LookupPath(pid, fileObject) != null));
+                }
+                return;
+            }
+
+            if (has)
+            {
+                _pend.Remove(irp);
+                Record(old.Pid, old.Proc, old.Fo, old.Size);
+            }
+
+            _pend[irp] = new PendingWrite { Qpc = qpc, Size = ioSize, Pid = pid, Proc = procName, Fo = fileObject };
+            _pendQ.Enqueue(irp);
+            DrainPending(qpc);
+        }
+    }
+
+    // 呼叫端必須持有 _pendLock
+    private static void DrainPending(long nowQpc)
+    {
+        while (_pendQ.Count > 0)
+        {
+            ulong head = _pendQ.Peek();
+            PendingWrite h;
+            if (!_pend.TryGetValue(head, out h)) { _pendQ.Dequeue(); continue; }
+            if (nowQpc - h.Qpc <= PairWindowTicks) break;
+            _pendQ.Dequeue();
+            _pend.Remove(head);
+            Record(h.Pid, h.Proc, h.Fo, h.Size);
+        }
+    }
+
+    private static void FlushPending()
+    {
+        lock (_pendLock)
+        {
+            foreach (PendingWrite h in _pend.Values) Record(h.Pid, h.Proc, h.Fo, h.Size);
+            _pend.Clear();
+            _pendQ.Clear();
+        }
+    }
+
+    private static void Record(int pid, string procName, ulong fileObject, int ioSize)
+    {
         string path = null;
         string source = "none";
 
@@ -517,8 +599,8 @@ internal static class CWatch
         {
             string dir = Path.Combine(_root, @"data\state");
             if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            long evW, evC, bytes, zero, unresolved, rm, rt, rd, jr, ds, ss, os, sf;
-            lock (_lock) { evW = _evWrite; evC = _evCreate; bytes = _bytesTotal; zero = _zeroSizeWrites; unresolved = _unresolvedBytes; rm = _resolvedMap; rt = _resolvedTrace; rd = _resolvedDevice; jr = Interlocked.Read(ref _junctionResolved); ds = Interlocked.Read(ref _dupesSkipped); ss = Interlocked.Read(ref _skippedStart); sf = Interlocked.Read(ref _skippedNoFo); os = Interlocked.Read(ref _opcodeSamples); }
+            long evW, evC, bytes, zero, unresolved, rm, rt, rd, jr, ds, ss, os, sf, pm;
+            lock (_lock) { evW = _evWrite; evC = _evCreate; bytes = _bytesTotal; zero = _zeroSizeWrites; unresolved = _unresolvedBytes; rm = _resolvedMap; rt = _resolvedTrace; rd = _resolvedDevice; jr = Interlocked.Read(ref _junctionResolved); ds = Interlocked.Read(ref _dupesSkipped); ss = Interlocked.Read(ref _skippedStart); sf = Interlocked.Read(ref _skippedNoFo); pm = Interlocked.Read(ref _pairsMerged); os = Interlocked.Read(ref _opcodeSamples); }
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("{");
             sb.AppendLine("  \"state\": \"" + state + "\",");
@@ -536,6 +618,7 @@ internal static class CWatch
             sb.AppendLine("  \"dupes_skipped\": " + ds + ",");
             sb.AppendLine("  \"skipped_start\": " + ss + ",");
             sb.AppendLine("  \"skipped_no_fileobj\": " + sf + ",");
+            sb.AppendLine("  \"pairs_merged\": " + pm + ",");
             sb.AppendLine("  \"opcode_samples\": " + os + ",");
             sb.AppendLine("  \"writes_without_size\": " + zero);
             sb.AppendLine("}");
@@ -605,16 +688,8 @@ internal static class CWatch
                 Interlocked.Increment(ref _evWrite);
                 try
                 {
-                    if (_opcodeSamples < 6)
-                    {
-                        long n = Interlocked.Increment(ref _opcodeSamples);
-                        if (n <= 6) Log("event sample: opcode=" + (int)d.Opcode + "/" + d.OpcodeName + " size=" + d.IoSize + " fo=" + d.FileObject);
-                    }
                     if (IsStartEvent(d)) { Interlocked.Increment(ref _skippedStart); return; }
-                    // FileIOInit 讓每筆 I/O 產生兩個事件，實測只有一個帶 FileObject
-                    // （另一個是 0）。略過沒有 FileObject 的，避免同一筆被算兩次。
-                    if (d.FileObject == 0) { Interlocked.Increment(ref _skippedNoFo); return; }
-                    Record(d.ProcessID, d.ProcessName, d.FileObject, d.FileName, d.IoSize, d.IrpPtr, (long)(d.TimeStampRelativeMSec * 10000.0));
+                    OnWrite(d.ProcessID, d.ProcessName, d.FileObject, d.IrpPtr, d.IoSize, (long)(d.TimeStampRelativeMSec * 10000.0));
                 }
                 catch { }
             };
@@ -623,6 +698,7 @@ internal static class CWatch
             {
                 try
                 {
+                    FlushPending();
                     FlushMinutes(false);
                     WriteHeartbeat("running");
                     string stopFile = Path.Combine(_root, @"data\state\collector.stop");
@@ -646,6 +722,7 @@ internal static class CWatch
             catch (Exception e) { Log("source error: " + e.Message); }
 
             flushTimer.Dispose();
+            FlushPending();
             FlushMinutes(true);
             WriteHeartbeat("stopped");
             Log("collector stopped");
@@ -677,8 +754,7 @@ internal static class CWatch
             try
             {
                 if (IsStartEvent(d)) { Interlocked.Increment(ref _skippedStart); return; }
-                if (d.FileObject == 0) { Interlocked.Increment(ref _skippedNoFo); return; }
-                Record(d.ProcessID, d.ProcessName, d.FileObject, d.FileName, d.IoSize, d.IrpPtr, (long)(d.TimeStampRelativeMSec * 10000.0));
+                OnWrite(d.ProcessID, d.ProcessName, d.FileObject, d.IrpPtr, d.IoSize, (long)(d.TimeStampRelativeMSec * 10000.0));
             }
             catch { }
         };

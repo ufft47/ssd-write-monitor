@@ -502,6 +502,56 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy',
 
 ---
 
+## 提權腳本一覽與建議執行順序
+
+所有腳本都在這個目錄，都需要使用者自行提權執行（助手不是管理員），
+且全部支援 `-DryRun`（不需提權即可預覽）。
+
+| 腳本 | 做什麼 | 需要安全模式 | 可逆 |
+|---|---|---|---|
+| `disable-autodesk.ps1` | 停 `Autodesk Access Service Host`、啟動類型改 `Disabled` | 否 | 是（`-Revert`） |
+| `avg-clean-and-move.ps1 -CleanJunk` | 刪 AVG 垃圾 302 項 / 4,653 MB | 否 | **否**（刪除） |
+| `avg-clean-and-move.ps1 -MoveProgramData` | `C:\ProgramData\AVG` → D: + junction | 建議 | 是（`-Revert`） |
+| `avg-move-programfiles.ps1` | `C:\Program Files\AVG` → D: + junction | **是**（互鎖） | 是（`-Revert`） |
+| `avg-try-stop.ps1` | 診斷「只關服務能不能解鎖」 | 否 | 是（自動復原） |
+| `remove-avg-browser.ps1` | 移除 AVG Secure Browser + 清孤兒 junction | 否 | 否（需重裝） |
+
+### 建議順序
+
+```powershell
+# 0) 隨時可做
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\disable-autodesk.ps1'
+
+# 1) 進安全模式，一次做完三件（重開機最麻煩，只做一次）
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-clean-and-move.ps1','-CleanJunk'
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-clean-and-move.ps1','-MoveProgramData'
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-move-programfiles.ps1','-Move'
+
+# 2) 正常開機後驗證
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-move-programfiles.ps1','-Verify'
+
+# 3) 移除 AVG Secure Browser（獨立，任何時候）
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\remove-avg-browser.ps1'
+```
+
+先清垃圾再搬，是因為 `defs\26111106`（575 MB）會被刪掉，複製量從 2.54 GB 降到約 1.97 GB。
+
+### AVG Secure Browser 為什麼值得移除
+
+它不是「閒置的程式」：排程工作 `AVGBrowserProtectS-1-5-21-...-1001`
+（`...\Application\AVGBrowserProtect.exe --runonce`）以使用者身分**每 10 分鐘**執行一次
+（實測上次 05:40:40、下次 05:50:50），持續碰觸 profile。當日仍有 12.7 MB 寫入 C:。
+
+它的 User Data 是 junction → `D:\MX500\avg-browser\User Data`（2,049 MB / 9,647 檔），
+卸載程式**不會**清它，所以 `remove-avg-browser.ps1` 會處理孤兒 junction。
+刪 junction 只能用 `cmd /c rmdir`，**不能加 `/s`**（會跟進刪掉 D: 上的目標）。
+
+profile 裡有 `Default\Bookmarks`（2024-05）與 `Default\Login Data`（2025-12，48 KB 已存密碼）。
+要連 profile 一起刪時必須加 `-RemoveProfile`，腳本會**先**把書籤與密碼等小檔案
+複製到 `D:\MX500\avg-browser\_backup-<時間>\`（約 0.5 MB）再刪。
+
+---
+
 ## 版本控制
 
 這個目錄是 git repo（分支 `main`）。

@@ -173,17 +173,36 @@ if ($CleanJunk) {
         } else {
             $freed = [int64]0
             $failed = 0
+            $failedBytes = [int64]0
+            $failedList = New-Object System.Collections.ArrayList
             foreach ($t in $targets) {
                 try {
                     Remove-Item -LiteralPath $t.Path -Recurse -Force -ErrorAction Stop
                     $freed += $t.Size
                 } catch {
                     $failed++
+                    $failedBytes += $t.Size
+                    [void]$failedList.Add($t.Path)
                     SayRaw ("      刪除失敗：{0}（{1}）" -f $t.Path, $_.Exception.Message) 'Red'
                 }
             }
-            Say ("實際刪除 {0:N0} MB（失敗 {1} 項）" -f ($freed / 1MB), $failed) `
+            Say ("實際刪除 {0:N0} MB（失敗 {1} 項，{2:N0} MB 未刪）" -f ($freed / 1MB), $failed, ($failedBytes / 1MB)) `
                 $(if ($failed -eq 0) { 'Green' } else { 'Yellow' })
+
+            # 若失敗項目落在 AVG 自我保護範圍，明確要求「安全模式再跑一次」。
+            # 實測 2026-11-15：正常開機下 Program Files\AVG\* 與 ProgramData\AVG\...\boottimescan.wim
+            # 都回「拒絕存取路徑」（avgSP.sys 擋的），合計 1,053 MB 沒刪掉。
+            if ($failed -gt 0) {
+                $protected = @($failedList | Where-Object {
+                    ($_ -like 'C:\Program Files\AVG\*') -or ($_ -like 'C:\ProgramData\AVG\*')
+                })
+                if ($protected.Count -gt 0) {
+                    SayRaw ''
+                    SayRaw '  失敗的項目在 AVG 自我保護（avgSP.sys）守護範圍內，正常開機狀態下刪不掉。' 'Yellow'
+                    SayRaw '  處理方式：進安全模式（avgSP 不載入）後重跑 -CleanJunk。' 'Yellow'
+                    SayRaw '  可以和「搬 ProgramData\AVG」與「搬 Program Files\AVG」排在同一次安全模式開機做完。' 'DarkGray'
+                }
+            }
         }
     }
 }

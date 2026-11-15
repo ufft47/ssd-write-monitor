@@ -7,6 +7,153 @@
 
 ---
 
+## 文件地圖（先看這裡）
+
+| 文件 | 內容 | 誰會看 |
+|---|---|---|
+| **`README.md`**（本檔） | 功能、操作、目錄結構、技術、未來目標；下面是各主題的深入說明 | 第一次接觸這個專案的人 |
+| [`docs/TODO.md`](docs/TODO.md) | **現在＋接下來**：進行中／已排程／候選任務 | **業主監控進度** |
+| [`docs/HISTORY.md`](docs/HISTORY.md) | 已完成項目的**估時／實際／倍率／驗收證據**；含被放棄的任務 | 想回頭查「這件事做過嗎、當時怎麼做」 |
+| [`docs/BACKLOG.md`](docs/BACKLOG.md) | 還沒進 TODO 的構想（無代號） | 想找下一個題目時 |
+| [`docs/development.md`](docs/development.md) | 開發紀錄：量測現實、方法論教訓、工具守則、待補的文件債 | 要改程式之前 |
+| `D:\MX500\系統目錄連結清單.md` | C: → D: 的 junction 對照表 | 忘記某個 D: 目錄原本在哪時 |
+
+> 規則：**完成的任務從 `TODO.md` 移到 `HISTORY.md`；`BACKLOG.md` 只放還沒承諾的構想。**
+
+---
+
+## 功能說明
+
+| 功能 | 說明 |
+|---|---|
+| **即時採樣** | 每 60 秒抓一次 `PhysicalDisk`（每顆實體碟的累計讀寫、佇列、忙碌率）與 `LogicalDisk` |
+| **精確歸因（ETW）** | 用 Kernel-File 事件記錄「哪個程式寫了哪個檔案」，只在應用程式自己的手柄（pid × FileObject）上計量 |
+| **每小時報告** | `reports\<日期>.md`、`latest.md`、`daily.md`，含 Top 程式、熱分鐘、對帳表 |
+| **網頁儀表板** | `http://localhost:8737`，每 15 秒自動更新：目前速率、今日落盤、24 小時趨勢、程式排行 |
+| **托盤** | 顏色代表目前寫入速率（綠 <5 MB/s、黃 >5、紅 >20），滑過看今日累計 |
+| **歸因清理工具** | `clean-attrib.ps1`：用「路徑可信度」扣掉不可能成立的歸因列，並按**實體碟**對帳 |
+| **搬移輔助腳本** | AVG／ASUS／夸克／分頁檔的搬移與移除，全部可 `-DryRun`、可 `-Revert` |
+
+### 它回答什麼、不回答什麼
+
+✅ 「C: 這小時被寫了多少」——可信。
+✅ 「哪些程式寫最多」——可信，但單筆可能誤歸因（見下方「歸因的極限」）。
+❌ 「某個位元組為什麼被寫」——無法回答，ETW 只記事件不記內容。
+❌ 「未緩衝 I/O 與核心內部寫入是誰做的」——**原理上無法歸因**（登錄檔 hive、NTFS 日誌／MFT、mapped page 回寫）。
+
+---
+
+## 操作說明
+
+```powershell
+# 看目前狀態
+Get-Content D:\dev\disk-monitor\data\state\collector.json -Raw | ConvertFrom-Json
+Get-ScheduledTask DiskMonitor, CWatchCollector, CWatchTray | Get-ScheduledTaskInfo
+
+# 開儀表板
+Start-Process 'http://localhost:8737/'
+
+# 歸因對帳（會扣掉可疑列，並按實體碟比對）
+powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\clean-attrib.ps1 -Top 12
+powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\clean-attrib.ps1 -Since 05:14   # 只看某時段
+
+# 儀表板單次輸出（不啟服務、不佔埠）
+powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\src\dashboard\cwatch-dashboard.ps1 `
+  -Root D:\dev\disk-monitor -Once -OutFile D:\TEMP\dash.html
+
+# 檢查 AVG 搬移是否還健康（五項條件）
+powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\check-avg-migration.ps1
+
+# 重新部署 collector（提權）
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\deploy-collector.ps1'
+```
+
+三個排程工作：
+
+| 工作 | 權限 | 作用 |
+|---|---|---|
+| `DiskMonitor` | 使用者 | 每小時產生報告 |
+| `CWatchCollector` | **最高** | ETW 收集（需要管理員才能開 kernel session） |
+| `CWatchTray` | 使用者 | 托盤圖示，並負責拉起儀表板 |
+
+---
+
+## 目錄結構
+
+```
+D:\dev\disk-monitor\
+├── README.md                    本檔（含深入說明）
+├── docs\                        ← 進度與開發紀錄
+│   ├── TODO.md                  現在＋接下來（業主看這個）
+│   ├── HISTORY.md               已完成＋被放棄＋估時倍率
+│   ├── BACKLOG.md               未排程的構想
+│   └── development.md           量測現實、方法論、工具守則
+├── src\
+│   ├── cwatch\                  ETW collector（C#，含 TraceEvent 相依 DLL）
+│   ├── dashboard\cwatch-dashboard.ps1   網頁儀表板（HTTP 8737）
+│   ├── tray\cwatch-tray.ps1     托盤
+│   ├── disk-sample.ps1          每 60 秒採樣
+│   ├── disk-report.ps1          每小時報告
+│   └── disk-daily.ps1           每日摘要
+├── data\                        (gitignore) 原始資料
+│   ├── phys\<日期>.csv          實體碟累計值（每分鐘）
+│   ├── attrib\<日期>.csv        ETW 歸因（minute,pid,process,volume,path,bytes,ops）
+│   └── state\                   collector 心跳、AVG 觀察期狀態
+├── reports\                     (gitignore) 每小時與每日報告
+├── logs\                        (gitignore) 腳本日誌、hourly-summary.log
+└── *.ps1                        提權用工具腳本（見下表）
+```
+
+根目錄的腳本（全部支援 `-DryRun`）：
+
+| 腳本 | 用途 |
+|---|---|
+| `clean-attrib.ps1` | 歸因清理與按實體碟對帳 |
+| `avg-clean-and-move.ps1` | AVG 垃圾清理／`ProgramData\AVG` 搬 D:（含 `-Verify`） |
+| `avg-move-programfiles.ps1` | `Program Files\AVG` 搬 D:（安全模式，含 `-Verify`/`-Revert`） |
+| `avg-try-stop.ps1` | 診斷「只關 AVG 服務能不能解鎖」（實測並自動復原） |
+| `remove-avg-browser.ps1` | 移除 AVG Secure Browser ＋清孤兒 junction |
+| `remove-quark.ps1` | 移除夸克网盘 ＋清懸空引用 |
+| `move-asus-ime-log.ps1` | ASUS 輸入法 ETW 追蹤：`-StopTrace` 或把 log 搬 D: |
+| `move-pagefile.ps1` | 主分頁檔搬 D:（**業主擱置**） |
+| `safemode.ps1` | 指定／取消下一次開機進安全模式（WinRE 缺失時的替代） |
+| `check-avg-migration.ps1` | AVG 搬移後續健康檢查（可註冊每日排程） |
+| `purge-leftovers.ps1` | 提權逐項清理搬移殘留 |
+| `disable-autodesk.ps1` | 關閉 Autodesk Access 更新器 |
+| `deploy-collector.ps1` / `install-*.ps1` / `setup-task.ps1` | 部署與註冊排程 |
+
+---
+
+## 使用的技術
+
+| 層 | 用什麼 | 為什麼 |
+|---|---|---|
+| 物理量 | `Win32_PerfRawData_PerfDisk_PhysicalDisk`（WMI） | 唯一能代表「真的寫到裝置」的數字 |
+| 歸因 | **ETW Kernel-File**（`Microsoft.Diagnostics.Tracing.TraceEvent`） | 能拿到 pid × FileObject × 檔名 |
+| Collector | C# / .NET Framework（`src\cwatch\CWatch.cs`） | 需要管理員開 kernel session，且要長時間穩定執行 |
+| 報告 | PowerShell 5.1（相容 7.6.9） | 環境內建、容易改、易與 WMI 搭配 |
+| 儀表板 | PowerShell 內建 `TcpListener` 寫 HTTP（無框架） | 不引入相依、單檔可跑、可直接讀本機資料 |
+| 托盤 | `System.Windows.Forms.NotifyIcon` | 內建 |
+| 排程 | Windows 工作排程器（三個工作） | 與現有環境一致 |
+
+---
+
+## 未來開發目標
+
+1. **拉高歸因率**：目前具名覆蓋率約 3–14%（安靜時段），最大宗是未緩衝 I/O 與核心內部寫入。
+   想辦法把「未緩衝」單獨量出來，或改用 IRP 層。
+2. **USN 變更日誌交叉驗證**：用檔案系統自己的紀錄反證 ETW 的歸因（需管理員）。
+3. **規則集中化**：把「路徑可信度」收成單一實作（現在儀表板、`clean-attrib.ps1`、
+   `disk-report.ps1` 三處各有一套，容易不同步）。
+4. **C: 寫入持續下降**：目前 124.30 → 132.46 GB 可用；下一個候選是使用者層快取（約 13 GB）。
+5. **可觀測性**：把「觀察期」這類狀態（如 `avg-migration.json`）做成儀表板的一頁。
+
+---
+
+---
+
+> **以下是各主題的深入說明**（原始技術紀錄，方便對照先前的對話與 commit）。
+
 ## 資料實際在哪裡
 
 這套工具用到的檔案分兩類：

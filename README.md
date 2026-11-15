@@ -533,6 +533,21 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy',
    - 改名成不含「AVG」的名字 → `Access to the path ... is denied`
    - 也就是說**連 `.bak` 都只能在安全模式刪**。
 
+### 搬完之後的殘留清理（08:29 實測）
+
+| 路徑 | 大小 | 結果 |
+|---|---|---|
+| `C:\ProgramData\ASUS\AsusIME\log.bak-20261115-061446` | 259.8 MB | ✅ 提權刪除 |
+| `C:\ProgramData\AVG.bak-20261115-075503` | 1,057.1 MB | ✅ 提權刪除 |
+| `D:\MX500\avg\ProgramData` | 1,056.5 MB | ❌ 拒絕存取 `'vault.db'` |
+| `C:\Users\ufft4\AppData\Local\AVG\Browser` | 360.8 MB | ❌ 拒絕存取 `'CrashReports'` |
+
+這裡有一個**判斷錯誤的實例**：一開始把四項的失敗全歸因於 `avgSP` 自我保護，實際上
+`ProgramData` 底下那兩項只是**權限**（`BUILTIN\Users` 沒有 `Delete` 權，助手又不是管理員），
+一提權就刪掉了。**只有最後兩項才是真的被 `avgSP` 擋。**
+
+→ 通則：`拒絕存取` 有兩個完全不同的原因（ACL vs 驅動攔截），先用「提權重試」把它們分開。
+
 ### 還沒搬的部分
 
 | 路徑 | 大小 | 說明 |

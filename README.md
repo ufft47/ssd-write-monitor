@@ -512,6 +512,27 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy',
    只是層級換成檔案系統。用 `-Verify` 隨時看 junction 還在不在。
 3. **安全模式期間防毒不存在**。搬移那十幾分鐘機器沒有即時防護，請不要在這段時間上網或插隨身碟。
 
+### 實測結果（2026-11-15，安全模式那趟）
+
+| 項目 | 結果 |
+|---|---|
+| `C:\Program Files\AVG` → `D:\MX500\avg\ProgramFiles` | **成功，junction 撐住了**。D: 上的定義檔 08:02:28 仍被更新 → AVG 確實透過 junction 寫入 |
+| `C:\ProgramData\AVG` → `D:\MX500\avg\ProgramData` | **失敗**。搬完驗證通過，但 AVG 在正常開機啟動時**拆掉 junction、重建全新實體目錄**（08:00–08:02） |
+| `C:\Users\ufft4\AppData\Local\AVG\Browser\User Data` | **junction 也被 AVG 那次重建拆掉**，改在 C: 重建 |
+| AVG Secure Browser | **AVG 自己把它整個移除了**（程式目錄、卸載登錄、排程工作全消失） |
+
+**結論：AVG 只接受 `Program Files\AVG` 是 junction，不接受 `ProgramData` 與 Browser 的 `AppData`。**
+
+兩個操作教訓：
+
+1. **安全模式裡的成功驗證不算數。** 當時服務是停的，驗證通過是真的；
+   AVG 一啟動就把 junction 換掉。`-MoveProgramData` 的驗證必須在**正常開機、AVG 跑起來之後**再做一次
+   —— 已加 `avg-clean-and-move.ps1 -Verify`（會判斷「被 AVG 接手」並列出備份與孤兒位置）。
+2. **`avgSP` 保護的是檔案本身，不是路徑字串。** 事後要刪 `.bak` 副本時：
+   - `Remove-Item` → `拒絕存取路徑 'vault.db'`
+   - 改名成不含「AVG」的名字 → `Access to the path ... is denied`
+   - 也就是說**連 `.bak` 都只能在安全模式刪**。
+
 ### 還沒搬的部分
 
 | 路徑 | 大小 | 說明 |

@@ -36,6 +36,20 @@
 .PARAMETER Revert
     把 junction 移除、原名稱改回來（還原 -MoveProgramData）。
 
+.PARAMETER Verify
+    檢查 ProgramData\AVG 的搬移結果。
+
+    **這個參數一定要在「正常開機、AVG 已啟動」之後跑。** 實測（2026-11-15 07:55）：
+    在安全模式裡搬完、驗證通過（junction 建立、落地測試成功），
+    但正常開機後 AVG 啟動時**把 junction 拆掉、重建了一個全新的實體目錄**，
+    並開始往 C: 寫（08:00–08:02）。腳本當下的驗證是真的，只是 AVG 還沒跑起來。
+
+    同時 AVG 那次重建也拆掉了
+    C:\Users\ufft4\AppData\Local\AVG\Browser\User Data 的 junction，
+    並把 AVG Secure Browser 整個移除（程式目錄、卸載登錄、排程工作全部消失）。
+
+    換句話說：**AVG 只接受 Program Files\AVG 是 junction，不接受 ProgramData\AVG。**
+
 .EXAMPLE
     # 先看會做什麼
     Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-clean-and-move.ps1','-All','-DryRun'
@@ -53,13 +67,14 @@ param(
     [switch]$MoveProgramData,
     [switch]$All,
     [switch]$DryRun,
-    [switch]$Revert
+    [switch]$Revert,
+    [switch]$Verify
 )
 
 $ErrorActionPreference = 'Stop'
 if ($All) { $CleanJunk = $true; $MoveProgramData = $true }
-if (-not ($CleanJunk -or $MoveProgramData -or $Revert)) {
-    Write-Host '請至少指定 -CleanJunk / -MoveProgramData / -All / -Revert 其中一個。' -ForegroundColor Yellow
+if (-not ($CleanJunk -or $MoveProgramData -or $Revert -or $Verify)) {
+    Write-Host '請至少指定 -CleanJunk / -MoveProgramData / -All / -Revert / -Verify 其中一個。' -ForegroundColor Yellow
     Write-Host '加 -DryRun 可先預覽。'
     exit 0
 }
@@ -101,7 +116,7 @@ if ($DryRun) { SayRaw '（DryRun：只顯示，不動任何東西）' 'Yellow' }
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin -and -not $DryRun) {
+if (-not $isAdmin -and -not $DryRun -and -not $Verify) {
     SayRaw ''
     SayRaw '需要管理員權限。請改用：' 'Red'
     SayRaw "  Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','$PSCommandPath','-All'"
@@ -114,6 +129,59 @@ if ($avgSP -and $avgSP.State -eq 'Running') {
     SayRaw '注意：avgSP.sys（AVG 自我保護）正在執行。' 'Yellow'
     SayRaw '      這不影響清理垃圾，但可能阻擋 ProgramData\AVG 的更名。若被阻擋，' 'Yellow'
     SayRaw '      請先在 AVG 主控台關閉自我保護：設定 → 一般 → 疑難排解 → 取消「啟用 AVG 自我保護」。' 'Yellow'
+}
+
+# =========================================================
+#  -Verify：正常開機後檢查 ProgramData\AVG 有沒有被 AVG 接手
+# =========================================================
+if ($Verify) {
+    SayRaw ''
+    SayRaw '=== 驗證 ProgramData\AVG 的搬移結果 ===' 'Cyan'
+    Write-Host ("  開機狀態 : {0}" -f (Get-CimInstance Win32_ComputerSystem).BootupState) -ForegroundColor DarkGray
+
+    $srcItem = Get-Item -LiteralPath $dataSrc -Force -ErrorAction SilentlyContinue
+    if (-not $srcItem) { Say "$dataSrc 不存在" 'Red'; exit 2 }
+    $isLink = [bool]$srcItem.LinkType
+    Say ("  C:\ProgramData\AVG 型態 : {0}" -f $(if ($isLink) { "$($srcItem.LinkType) -> $($srcItem.Target -join ',')" } else { '實體目錄' })) `
+        $(if ($isLink) { 'Green' } else { 'Yellow' })
+
+    if (-not $isLink) {
+        # 不是 junction：判斷是被 AVG 接手重建，還是從來沒搬過
+        $newest = Get-ChildItem -LiteralPath $dataSrc -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $baks = @(Get-ChildItem -LiteralPath 'C:\ProgramData' -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like 'AVG.bak-*' })
+        if ($baks.Count -gt 0 -and $newest) {
+            Say ''
+            Say '  判定：AVG 把 junction 拆掉了，改用自己的實體目錄。' 'Red'
+            Say ("  新目錄持續在寫（最新 {0:yyyy-MM-dd HH:mm:ss}：{1}）" -f $newest.LastWriteTime, $newest.Name) 'DarkGray'
+            foreach ($b in $baks) {
+                Say ("  舊資料備份仍在：C:\ProgramData\{0}（{1:N0} MB）" -f $b.Name, ((SizeOf $b.FullName) / 1MB)) 'DarkGray'
+            }
+            if (Test-Path -LiteralPath $dataDst) {
+                Say ("  D: 上的副本（孤兒）：{0}（{1:N0} MB）" -f $dataDst, ((SizeOf $dataDst) / 1MB)) 'DarkGray'
+            }
+            Say ''
+            Say '  處理建議：不要再搬 ProgramData（AVG 會重建）。用 -Revert 可把舊資料改回來，' 'Yellow'
+            Say '  或直接刪掉 .bak 與 D: 副本（都需要安全模式，因為 avgSP 會擋刪除）。' 'Yellow'
+        } else {
+            Say '  判定：從來沒有搬過（沒有 .bak 備份）。' 'Yellow'
+        }
+    } else {
+        # 是 junction：確認 D: 上的檔案有沒有在長
+        $newestD = Get-ChildItem -LiteralPath $dataDst -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($newestD) {
+            Say ("  D: 上最新寫入 : {0:yyyy-MM-dd HH:mm:ss}（{1}）" -f $newestD.LastWriteTime, $newestD.Name) 'Green'
+            $age = ((Get-Date) - $newestD.LastWriteTime).TotalMinutes
+            Say ("  距今 {0:N0} 分鐘 → {1}" -f $age, $(if ($age -lt 30) { 'AVG 正在透過 junction 寫入 D:，正常' } else { '超過 30 分鐘沒動，請確認 AVG 是否閒置' })) `
+                $(if ($age -lt 30) { 'Green' } else { 'Yellow' })
+        }
+    }
+    SayRaw ''
+    SayRaw ("日誌：$logFile") 'DarkGray'
+    SayRaw ''
+    exit 0
 }
 
 # =========================================================

@@ -121,7 +121,7 @@ function Get-Recon($cdiGB, $physBytes) {
     if ([double]$cdiGB -lt 5) { return $null }
     $smartBytes = [double]$cdiGB * 1GB
     $pct = (([double]$physBytes - $smartBytes) / $smartBytes) * 100
-    $bad = ([math]::Abs($pct) -gt 20)
+    $bad = ([math]::Abs($pct) -gt 10)
     $mark = '✓'
     if ($bad) { $mark = ('⚠ {0:+#;-#}%' -f [math]::Round($pct)) }
     return [pscustomobject]@{ Pct = $pct; Bad = $bad; Mark = $mark }
@@ -341,7 +341,7 @@ $null = $sb.AppendLine('- 本監控的資料寫在 D:（`D:\MX500\monitoring`）
 $null = $sb.AppendLine('  其中 `data\state\proc-prev.json`（約 18 KB × 1440 次）佔絕大部分。看 D: 的細微變化要扣掉這 26 MB。')
 $null = $sb.AppendLine('- SMART 單位是 CrystalDiskInfo 顯示的 GB、解析度 1 GB；單日 1–2 GB 的差異可能只是取整。')
 $null = $sb.AppendLine('- CDI 沒在跑的日子沒有資料（表中顯示 —），那些天不列入平均。')
-$null = $sb.AppendLine('- 「對帳」欄 = `(落盤 − SMART) / SMART`：兩邊都有值且 SMART ≥ 5 GB 才計算，`|差距| > 20%` 標 `⚠`。')
+$null = $sb.AppendLine('- 「對帳」欄 = `(落盤 − SMART) / SMART`：兩邊都有值且 SMART ≥ 5 GB 才計算，`|差距| > 10%` 標 `⚠`。')
 $null = $sb.AppendLine('  用途是抓「落盤量與 SMART 對不上」的日子（裝置編號對調、計數器重置、資料缺口都會造成）。')
 $null = $sb.AppendLine('  落在門檻內顯示 `✓`，資料不足顯示 `—`；遷移日當天只有半天資料，出現 `⚠` 屬正常。')
 $null = $sb.AppendLine('- 落盤量以「磁碟區標籤」分組，不採裝置編號：重開機後裝置編號可能對調（曾發生 dev2/dev3 互換）。')

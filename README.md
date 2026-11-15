@@ -115,6 +115,7 @@ D:\dev\disk-monitor\
 | `remove-avg-browser.ps1` | 移除 AVG Secure Browser ＋清孤兒 junction |
 | `remove-quark.ps1` | 移除夸克网盘 ＋清懸空引用 |
 | `move-asus-ime-log.ps1` | ASUS 輸入法 ETW 追蹤：`-StopTrace` 或把 log 搬 D: |
+| `move-edge-ud.ps1` | Edge 的 `User Data` 搬 D:（junction；`-DryRun` / `-Apply` / `-Verify` / `-Revert`） |
 | `move-pagefile.ps1` | 主分頁檔搬 D:（**業主擱置**） |
 | `safemode.ps1` | 指定／取消下一次開機進安全模式（WinRE 缺失時的替代） |
 | `check-avg-migration.ps1` | AVG 搬移後續健康檢查（可註冊每日排程） |
@@ -774,6 +775,41 @@ ETW 只看得到「有檔名的寫入」；其餘是未緩衝 I/O（Robocopy `/J
 |---|---|---|
 | `C:\Program Files\Common Files\AVG` | 77.3 MB | `Icarus\avg-av-vps\temp\` 的更新暫存（當日 14.6 MB + 11.3 MB + 3.9 MB）。量小，暫不處理 |
 | `C:\ProgramData\AVG` | 4.67 GB | 由 `avg-clean-and-move.ps1 -MoveProgramData` 處理（含常態快取，當日 198 MB） |
+
+---
+
+## Edge 的 User Data 搬到 D:（2026-11-16）
+
+Chrome 早就用同一招（`...\Google\Chrome\User Data` → `D:\MX500\chrome\User Data`），
+Edge 只是把第 4 個瀏覽器 profile 也搬過去。工具：`move-edge-ud.ps1`（`-DryRun` / `-Apply` / `-Verify` / `-Revert`）。
+
+| 項目 | 結果 |
+|---|---|
+| 來源 | `C:\Users\ufft4\AppData\Local\Microsoft\Edge\User Data` |
+| 現在型態 | **Junction** → `D:\MX500\edge\User Data` |
+| 檔案數 / 大小 | **18,663 檔 / 1.89 GB**（走訪時跳過 reparse point） |
+| robocopy 後逐檔比對 | 缺 **0**、大小不同 **0** |
+| 寫入落地測試 | 從 C: 路徑寫入 → 出現在 D:：**是** |
+| 備份（C:，尚未刪） | `...\Edge\User Data.bak-20261116-013507`（1.89 GB） |
+
+**Edge 不會像 AVG 那樣拆掉 junction** —— 兩者不在同一層：
+
+| | AVG（`ProgramData\AVG`） | Edge / Chromium（`User Data`） |
+|---|---|---|
+| 自我保護 | 有：`avgSP.sys`（System 級驅動，實測存在） | **沒有**：只有 3 個 updater 服務（`edgeupdate` / `edgeupdatem` / `MicrosoftEdgeElevationService`），核心驅動 0 個 |
+| 實測 | 啟動時把 junction 拆掉、重建實體目錄，改往 C: 寫 | Junction 存活；Chrome 在同一個 junction 上正常寫入 D:（`Local State` 11-15 06:54 仍在更新） |
+
+> 還沒拿到直接證據的一點：**重開機後** Chromium 是否仍接受同一個 junction。
+> 本機 Chrome 在最後一次開機（11-15 07:58）之後沒有再開啟，所以目前只能確認
+> 「junction 至今仍是 Junction、沒被換成實體目錄」。Edge 自己的重開機驗證要等下一次開機後跑 `-Verify`。
+
+**待辦**
+
+1. **觀察 3 天**（比照 AVG 的觀察期）：每天開一次 Edge 確認書籤／登入狀態正常，必要時跑
+   `move-edge-ud.ps1 -Verify`（結論 `OK` = junction 指向正確、且從 C: 寫入真的落在 D:）。
+2. **Edge 大版本更新後再跑一次 `-Verify`**（更新器不碰 `User Data`，但它是唯一還會動到 profile 的東西）。
+3. 期滿且確認正常才刪 `User Data.bak-20261116-013507`。**在那之前 C: 的實際釋放是 0**
+   —— 1.89 GB 只是從「使用中的 profile」變成「備份」，兩者都還在 C:。
 
 ---
 

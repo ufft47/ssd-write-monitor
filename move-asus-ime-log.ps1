@@ -137,8 +137,42 @@ if ($StopTrace) {
 }
 
 if ($srcItem.LinkType -and -not $Revert) {
+    # 已經是連結：不要只印「無需搬移」就結束 —— 要驗證「寫入真的落在 D:」。
+    # 實測 2026-11-15：這條路早在 06:14 就做過，但當時只印了一句「已經是連結」，
+    # 我因此誤判「重回開機後 ASUS 又開始寫 C:」。實際上寫入一直在 D:。
     Say ''
-    Say '  已經是連結了，無需搬移。' 'Yellow'
+    Say ("  已經是 {0} -> {1}" -f $srcItem.LinkType, ($srcItem.Target -join ',')) 'Green'
+    $target = @($srcItem.Target)[0]
+    if ($target -and (Test-Path -LiteralPath $target)) {
+        $etlD = Join-Path $target 'asus_ime_service.etl'
+        if (Test-Path -LiteralPath $etlD) {
+            $before = (Get-Item -LiteralPath $etlD -Force).Length
+            Say ("  D: 上的 .etl 目前 {0:N2} MB，等 15 秒確認是否成長…" -f ($before / 1MB))
+            Start-Sleep -Seconds 15
+            $after = (Get-Item -LiteralPath $etlD -Force).Length
+            $grew = ($after -gt $before)
+            Say ("  {0:N2} MB -> {1:N2} MB（+{2:N3} MB）→ {3}" -f ($before / 1MB), ($after / 1MB), (($after - $before) / 1MB),
+                $(if ($grew) { '寫入確實落在 D:' } else { '這段時間沒有成長（可能是沒有輸入行為）' })) `
+                $(if ($grew) { 'Green' } else { 'Yellow' })
+        }
+        # 從 C: 路徑讀，確認是同一個檔案
+        $etlC = Join-Path $src 'asus_ime_service.etl'
+        if (Test-Path -LiteralPath $etlC) {
+            $lc = (Get-Item -LiteralPath $etlC -Force).Length
+            $ld = (Get-Item -LiteralPath $etlD -Force).Length
+            Say ("  C: 路徑與 D: 路徑是同一個檔案：{0}（{1:N3} MB / {2:N3} MB）" -f `
+                $(if ([math]::Abs($lc - $ld) -le 4096) { '是' } else { '否！' }), ($lc / 1MB), ($ld / 1MB)) `
+                $(if ([math]::Abs($lc - $ld) -le 4096) { 'Green' } else { 'Red' })
+        }
+    } else {
+        Say ("  目標不存在：{0}（連結是壞的）" -f $target) 'Red'
+    }
+    # 殘留的 .bak（搬移當時留下的舊資料）可以刪，ASUS 沒有自我保護
+    $baks = @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'log.bak-*' })
+    foreach ($b in $baks) {
+        Say ("  殘留備份：{0}（{1:N0} MB）—— 確認 ASUS 輸入法正常後可刪" -f $b.Name, ((SizeOf $b.FullName) / 1MB)) 'Yellow'
+    }
     Say ("  （要還原請加 -Revert）") 'DarkGray'
     exit 0
 }

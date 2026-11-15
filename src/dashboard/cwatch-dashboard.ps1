@@ -55,14 +55,47 @@ function Get-PhysTail([datetime]$day, [int]$keep) {
     return $out
 }
 
-# 某裝置今日累計 + 最近速率
-function Get-DeviceStat($rows, [string]$dev) {
-    $list = @($rows | Where-Object { $_.dev -eq $dev } | Sort-Object perf)
+# 磁碟區相對路徑（\Device\HarddiskVolumeN\...）被冠上磁碟機代號後，會長成
+#   C:\Device\HarddiskVolume12\download\...
+# 那不是 C: 的檔案（HarddiskVolume12 是另一顆碟），而是「無法對應磁碟機」的路徑。
+$devicePathPattern = '^[A-Za-z]:\\Device\\HarddiskVolume\d+|^\\\\\?\\Device\\|^\\Device\\'
+# 路徑可信度（與 clean-attrib.ps1 同一套規則）：
+#   目錄 = 可疑；不存在且不在暫存／快取路徑下 = 可疑
+# 實測 2026-11-15：Robocopy 的幻影列（C:\Users\ufft4\.claude\ide 9.4 GB、
+# herdr\client\endpoints.json 7.6 GB、ApplicationInsightsDiagnostics.json 4.6 GB…）
+# 都在這裡被擋掉，排行榜與覆蓋率才不會被灌爆。
+$ephemeralPath = '\\Temp\\|\\Temporary Internet Files\\|\\INetCache\\|\\Cache\\|\\Sessions\\|\\Crashpad\\|\\Code Cache\\|\\GPUCache\\|\\Logs?\\|\.tmp$|\.log$|\.etl$|\.dmp$'
+$script:verdictCache = @{}
+function Get-PathTrust([string]$p) {
+    # 路徑不明時，「磁碟區」也是猜的（實測：Robocopy 寫 F:，卻被記成 volume=C:、
+    # path=(其他)，4.1 GB）。這種列不能算給任何磁碟區，一律歸 (device)。
+    if ($p -eq '(其他)' -or $p -eq '(unknown)') { return 'device' }
+    if ($p -match $devicePathPattern) { return 'device' }
+    if ($script:verdictCache.ContainsKey($p)) { return $script:verdictCache[$p] }
+    $v = 'suspect'
+    try {
+        $i = Get-Item -LiteralPath $p -Force -ErrorAction Stop
+        if ($i.PSIsContainer) { $v = 'dir' } else { $v = 'ok' }
+    } catch {
+        if ($p -match $ephemeralPath) { $v = 'ok' }
+    }
+    $script:verdictCache[$p] = $v
+    return $v
+}
+
+# 某磁碟區今日累計 + 最近速率
+# 注意：要用「磁碟區標籤」查，不要用裝置編號。
+# 實測 2026-11-15：裝置編號會在重開機後對調（dev 2 從 I:F: 變成 D:、dev 3 從 D: 變成 I:F:），
+# 若用 dev 3 當鍵，會把 D: 與 Robocopy 正在灌的 I:/F: 加在一起（127 GB 假數字）。
+function Get-VolumeStat($rows, [string]$vol) {
+    $list = @($rows | Where-Object { $_.vols -eq $vol } | Sort-Object ts)
     $r = [pscustomobject]@{ Write = [double]0; Read = [double]0; Rate = 0.0; LastTs = $null; Elapsed = 0.0 }
     if ($list.Count -lt 2) { return $r }
     $prev = $null
     foreach ($x in $list) {
         if ($null -ne $prev) {
+            # 裝置編號在同一個磁碟區標籤下變了 → 這是兩顆不同的碟，不能相減
+            if ($x.dev -ne $prev.dev) { $prev = $x; continue }
             $e = ($x.perf - $prev.perf) / [double]$prev.freq
             if ($e -gt 0) {
                 $dw = $x.wb - $prev.wb
@@ -150,8 +183,8 @@ function New-Dashboard {
     $today = $now.Date
     # 讀整天（檔案很小，約 8k 行/日）；先前只讀尾巴 400 行，會讓「今日」只算到最近一小時
     $rows = Get-PhysTail $today 100000
-    $c = Get-DeviceStat $rows '0'
-    $d = Get-DeviceStat $rows '3'
+    $c = Get-VolumeStat $rows 'C:'
+    $d = Get-VolumeStat $rows 'D:'
 
     $hb = Get-Heartbeat
     $hbAge = -1
@@ -200,10 +233,20 @@ function New-Dashboard {
     }
     $droppedRows = $attrAll.Count - $attr.Count
     $agg = @{}
+    $suspectBytes = [double]0
+    $deviceBytes = [double]0
     foreach ($r in $attr) {
-        $k = $r.Process + '|' + $r.Volume
+        $trust = Get-PathTrust $r.Path
+        if ($trust -ne 'ok') {
+            # 裝置層級（volume 本身就是 (device)）= 真的無法歸屬
+            # 其他（路徑不存在／是目錄／路徑不明）= 可疑列，可能是 ETW 的幻影歸因
+            if ($r.Volume -eq '(device)') { $deviceBytes += $r.Bytes } else { $suspectBytes += $r.Bytes }
+            continue
+        }
+        $vol = $r.Volume
+        $k = $r.Process + '|' + $vol
         if (-not $agg.ContainsKey($k)) {
-            $agg[$k] = [pscustomobject]@{ Process = $r.Process; Volume = $r.Volume; Bytes = [double]0; Ops = [double]0; Files = @{} }
+            $agg[$k] = [pscustomobject]@{ Process = $r.Process; Volume = $vol; Bytes = [double]0; Ops = [double]0; Files = @{} }
         }
         $agg[$k].Bytes += $r.Bytes
         $agg[$k].Ops += $r.Ops
@@ -212,13 +255,7 @@ function New-Dashboard {
             $agg[$k].Files[$r.Path] += $r.Bytes
         }
     }
-    $topAll = @()
-    $deviceBytes = [double]0
-    foreach ($a in $agg.Values) {
-        if ($a.Volume -eq '(device)') { $deviceBytes += $a.Bytes; continue }
-        $topAll += $a
-    }
-    $topAll = @($topAll | Sort-Object Bytes -Descending | Select-Object -First 15)
+    $topAll = @($agg.Values | Sort-Object Bytes -Descending | Select-Object -First 15)
     $topC = @($agg.Values | Where-Object { $_.Volume -eq 'C:' } | Sort-Object Bytes -Descending | Select-Object -First 12)
 
     # 具名覆蓋率：ETW 認得的 C: 寫入 ÷ PhysicalDisk 實測的 C: 寫入
@@ -239,17 +276,27 @@ function New-Dashboard {
         $win = [double]0
         if ($null -ne $windowStart) {
             $prevWb = $null
-            $cRows = @($rows | Where-Object { $_.dev -eq '0' } | Sort-Object perf)
+            $prevDev = $null
+            $cRows = @($rows | Where-Object { $_.vols -eq 'C:' } | Sort-Object ts)
             foreach ($x in $cRows) {
-                if ($null -ne $prevWb -and $x.ts -ge $windowStart -and $x.wb -ge $prevWb) { $win += ($x.wb - $prevWb) }
+                if ($null -ne $prevWb -and $x.dev -eq $prevDev -and $x.ts -ge $windowStart -and $x.wb -ge $prevWb) {
+                    $win += ($x.wb - $prevWb)
+                }
                 $prevWb = $x.wb
+                $prevDev = $x.dev
             }
         }
         if ($win -gt 0) {
-            $cov = $namedC / $win * 100
-            $coverageNote = ('具名覆蓋率 {0:N1}%（{1} 起）：ETW 認得 {2} ／ PhysicalDisk 實測 {3}。' -f $cov, $firstMin.Substring(11), (Format-Bytes $namedC), (Format-Bytes $win))
-            if ($cov -lt 60) {
-                $coverageNote += ' 未具名的主要來自未緩衝 I/O（如 Robocopy /J）與 collector 啟動前就開好的檔案 —— 那兩類在 ETW 這一層拿不到檔名，不是程式漏記。'
+            # 只在不誇張時才顯示百分比；>105% 代表 ETW 這一層把別的磁碟區也算進來了
+            # （實測 2026-11-15：Robocopy 寫 F: 被記成 C:，覆蓋率一度顯示 7,765%）
+            $ratio = $namedC / $win * 100
+            if ($ratio -le 105) {
+                $coverageNote = ('具名覆蓋率 {0:N1}%（{1} 起）：ETW 認得 {2} ／ PhysicalDisk 實測 {3}。' -f $ratio, $firstMin.Substring(11), (Format-Bytes $namedC), (Format-Bytes $win))
+                if ($ratio -lt 60) {
+                    $coverageNote += ' 這個比例本來就偏低：ETW 只看得到「有檔名的寫入」，其餘是未緩衝 I/O（Robocopy /J、資料庫）與核心內部寫入（登錄檔 hive、NTFS 日誌／MFT、映射回寫）—— 後者原理上沒有行程可歸因。'
+                }
+            } else {
+                $coverageNote = ('具名 {0} ＞ 實測 {1}（{2} 起）：ETW 有列被歸到錯的磁碟區，已從排行榜排除；兩個數字僅供參考。' -f (Format-Bytes $namedC), (Format-Bytes $win), $firstMin.Substring(11))
             }
         }
     }
@@ -357,7 +404,8 @@ $(RowHtml $topAll $false)
 <p class="muted" style="margin-top:24px;font-size:12px">
 資料來源：PhysicalDisk（落盤總量）＋ ETW Kernel-File（進程 × 檔案）。<br>
 ETW 只記錄寫入事件；「次數」是寫入 IRP 數，不代表檔案數。<br>
-無法歸屬到檔案的寫入（主控台／pipe／裝置／未緩衝 I/O）：$(Format-Bytes $deviceBytes)（不列入上方排行）。<br>
+無法歸屬到檔案（裝置／pipe／未緩衝 I/O）：$(Format-Bytes $deviceBytes)<br>
+已排除的可疑列（路徑不存在、是目錄、或路徑不明＝磁碟區也可能是猜的）：$(Format-Bytes $suspectBytes)<br>
 記憶體映射（mmap）的寫入在系統上記為 <code>System</code>，不會記到原程式。<br>
 若某段資料的時間早於目前 collector 的啟動時間，那段可能由舊版程式產生，僅供參考。<br>
 $(if ($null -ne $hb) { 'collector 心跳：' + $hb.updated + '（pid ' + $hb.pid + '）' } else { 'collector 尚未啟動' })

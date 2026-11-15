@@ -533,6 +533,35 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy',
    - 改名成不含「AVG」的名字 → `Access to the path ... is denied`
    - 也就是說**連 `.bak` 都只能在安全模式刪**。
 
+### 觀察期滿了沒：`check-avg-migration.ps1`
+
+刪掉 `C:\Program Files\AVG.bak-…`（1,967.6 MB）之前要先確認 AVG 真的穩定。這件事不靠記憶，
+用可觀測的條件判斷，五項全過才算數：
+
+| 檢查 | 判準 |
+|---|---|
+| junction 還在且目標正確 | `C:\Program Files\AVG` → `D:\MX500\avg\ProgramFiles` |
+| AVG 服務 | `AVG Antivirus` = `Running` |
+| 病毒定義是新的 | 最新非 `*_stream` 定義目錄在 `-MaxDefAgeDays`（預設 5）天內更新 |
+| 定義寫在 D: | `D:\MX500\avg\ProgramFiles\Antivirus\defs` 有近期寫入 |
+| 安全性中心登記路徑 | `pathToSignedProductExe` 在 `D:\MX500\...` |
+
+三個結論與結束碼：`OK`＝0（可以刪）、`WAIT`＝1（觀察期未滿，預設 3 天）、`PROBLEM`＝2（不要刪，看哪項壞了）。
+
+```powershell
+# 隨時手動檢查（不需管理員）
+powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\check-avg-migration.ps1
+
+# 註冊每日 09:00 自動檢查（提權一次）
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\check-avg-migration.ps1','-RegisterTask'
+
+# 刪完備份後移除排程
+Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\check-avg-migration.ps1','-UnregisterTask'
+```
+
+結果會寫進 `data\state\avg-migration.json` 與 `logs\avg-migration-check.log`。
+**若結論是 PROBLEM 且是 junction 不見了**，代表 AVG 把目錄重建回 C: —— 那時要還原而不是刪備份。
+
 ### 搬完之後的殘留清理（08:29 實測）
 
 | 路徑 | 大小 | 結果 |
@@ -574,6 +603,8 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy',
 | `move-asus-ime-log.ps1` | 停 ASUS IME 的 ETW 追蹤（`-StopTrace`）或把 log 搬 D: | 否 | 是（`-Revert`） |
 | `move-pagefile.ps1` | 主分頁檔搬到 D:（C: 省 22 GB） | 否 | 是（`-Revert`） |
 | `safemode.ps1` | 指定／取消「下一次開機進安全模式」（`bcdedit`） | — | 是（`-Exit`） |
+| `check-avg-migration.ps1` | 檢查 AVG 搬到 D: 後是否穩定、可否刪備份（可註冊每日排程） | 否 | 是（`-UnregisterTask`） |
+| `purge-leftovers.ps1` | 提權逐項清理搬移殘留（分辨「權限」與「avgSP 攔截」） | 否 | 否（刪除） |
 
 ### 建議順序
 

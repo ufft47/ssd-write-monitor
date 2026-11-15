@@ -385,12 +385,16 @@ foreach ($r in ($physAll | Sort-Object ts)) {
 $devOrder = @($devOrder | Sort-Object { [int]($_ -replace '\D', '') })
 
 $physByDev = @{}
-foreach ($dev in $devOrder) { $physByDev[$dev] = @($physAll | Where-Object { $_.key -eq $dev } | Sort-Object perf) }
+# 排序一律用「牆上時間」ts，不要用 perf。
+# 實測 2026-11-15：ts_perf 是「開機後經過的 100ns」，每次重開機歸零（當天歸零 5 次）。
+# 用 perf 排序會把「新開機期（perf 小）」排在「舊開機期（perf 大）」前面，
+# 於是跨期的位元組差看起來像一筆巨大的寫入 —— 07:00 與 08:00 各被記成 310 GB。
+foreach ($dev in $devOrder) { $physByDev[$dev] = @($physAll | Where-Object { $_.key -eq $dev } | Sort-Object ts) }
 
 $diskNames = @($logAll | ForEach-Object { $_.key } | Sort-Object -Unique)
 $diskNames = @($diskNames | Sort-Object @{ Expression = { if ($_ -eq 'C:') { 0 } else { 1 } } }, { $_ })
 $logByDisk = @{}
-foreach ($dn in $diskNames) { $logByDisk[$dn] = @($logAll | Where-Object { $_.key -eq $dn } | Sort-Object perf) }
+foreach ($dn in $diskNames) { $logByDisk[$dn] = @($logAll | Where-Object { $_.key -eq $dn } | Sort-Object ts) }
 
 # 找到承載 C: 的實體裝置
 $cDev = $null

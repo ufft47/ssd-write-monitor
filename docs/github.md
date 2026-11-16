@@ -18,8 +18,7 @@
 
 | 日期 | 類型 | 內容 | Commit |
 |---|---|---|---|
-| 2026-11-16 | **首次發佈** | public repo 建立、MIT、中英雙語說明（`README.md` / `README.zh-TW.md`）、`NOTICE.md`、`.gitignore` 排除執行期資料（`data/ reports/ logs/`）與編譯產物 | `—` |
-| 2026-11-16 | docs | 公開前整理：英文版 README、LICENSE、NOTICE、去識別（`WIN10-MX5000\<user>` → `<user>`、`C:\Users\<user>` → `%USERPROFILE%`）、新增本檔 | `—` |
+| 2026-11-16 | **首次發佈** | public repo 建立（MIT）：中英雙語說明（`README.md` / `README.zh-TW.md`）、英文版 README、`LICENSE`、`NOTICE.md`（微軟 DLL 授權）、去識別（`WIN10-MX5000\<user>` → `<user>`、`C:\Users\<user>` → `%USERPROFILE%`）、`.gitignore` 排除執行期資料（`data/ reports/ logs/`）與編譯產物、新增本檔。推送 50 個檔案。 | `3a9ef7b` |
 
 > 「Commit」欄留 `—` 表示那是發佈動作本身或僅文件調整；有對應 commit 時填短 hash。
 

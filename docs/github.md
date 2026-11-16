@@ -19,6 +19,7 @@
 | 日期 | 類型 | 內容 | Commit |
 |---|---|---|---|
 | 2026-11-16 | **首次發佈** | public repo 建立（MIT）：中英雙語說明（`README.md` / `README.zh-TW.md`）、英文版 README、`LICENSE`、`NOTICE.md`（微軟 DLL 授權）、去識別（`WIN10-MX5000\<user>` → `<user>`、`C:\Users\<user>` → `%USERPROFILE%`）、`.gitignore` 排除執行期資料（`data/ reports/ logs/`）與編譯產物、新增本檔。推送 50 個檔案。 | `3a9ef7b` |
+| 2026-11-16 | fix | `remove-quark.ps1` / `remove-avg-browser.ps1` / `purge-leftovers.ps1` 移除寫死的 `C:\Users\<user>`，改用 `$env:LOCALAPPDATA` / `$env:APPDATA`（同機展開值不變，其他使用者才找得到自己的目錄；DryRun 已核對） | `fa95894` |
 
 > 「Commit」欄留 `—` 表示那是發佈動作本身或僅文件調整；有對應 commit 時填短 hash。
 

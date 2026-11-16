@@ -512,6 +512,15 @@ function New-DashboardHtml($s, [bool]$Live = $true) {
         $updHint = '每 15 秒自動更新'
         $updInit = '最後更新 ' + $s.clock
         $hourBox = '<div id="hourDetail"></div>'
+        # 圖表標題列＋「即時」按鈕（只有線上模式才有；-Once 不可以留 liveBtn）
+        $chartHead = '<div class="chartbar"><h2>最近 24 小時 C: 落盤</h2><button id="liveBtn" class="active" type="button">即時</button></div>'
+        $liveCss = @'
+.chartbar{display:flex;align-items:center;justify-content:space-between;margin:26px 0 8px}
+.chartbar h2{margin:0}
+#liveBtn{background:#21262d;border:1px solid #30363d;color:#8b949e;border-radius:6px;padding:3px 12px;font-size:12px;font-family:inherit;cursor:pointer}
+#liveBtn.active{background:#1f6feb;border-color:#1f6feb;color:#fff}
+#liveBtn:hover{border-color:#8b949e}
+'@
         $js = @"
 var LIVE = true;
 (function () {
@@ -605,18 +614,44 @@ var LIVE = true;
       .catch(function () { markFail(); })
       .then(function () { busy = false; });
   }
-  var selectedHour = null;
+  var selHour = null;
   var chartBox = document.getElementById('chart');
+  var hourBox = document.getElementById('hourDetail');
+  var liveBtn = document.getElementById('liveBtn');
   function highlight() {
     if (!chartBox) { return; }
     var rects = chartBox.querySelectorAll('rect[data-hour]');
     for (var i = 0; i < rects.length; i++) {
-      if (selectedHour !== null && rects[i].getAttribute('data-hour') === selectedHour) {
+      if (selHour !== null && rects[i].getAttribute('data-hour') === selHour) {
         rects[i].setAttribute('fill', '#f0883e');
       } else {
         rects[i].setAttribute('fill', '#1f6feb');
       }
     }
+  }
+  function syncLiveBtn() {
+    if (!liveBtn) { return; }
+    if (selHour === null) { liveBtn.classList.add('active'); }
+    else { liveBtn.classList.remove('active'); }
+  }
+  function backToLive() {
+    selHour = null;
+    highlight();
+    syncLiveBtn();
+    if (hourBox) {
+      while (hourBox.firstChild) { hourBox.removeChild(hourBox.firstChild); }
+      hourBox.style.display = 'none';
+    }
+  }
+  function enterHour(h) {
+    selHour = h;
+    highlight();
+    syncLiveBtn();
+    if (hourBox) { hourBox.style.display = ''; }
+    fetch('/api/hour?hour=' + encodeURIComponent(h), { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) { throw new Error('HTTP ' + r.status); } return r.json(); })
+      .then(function (d) { showHourDetail(d); })
+      .catch(function () { showHourError(h); });
   }
   function showHourDetail(d) {
     var box = document.getElementById('hourDetail');
@@ -681,18 +716,17 @@ var LIVE = true;
   }
   if (chartBox) {
     // 事件委派：綁在容器上，圖表每 15 秒被 innerHTML 換掉也不受影響
+    // 點同一根 = 取消（回即時）；點別根 = 切到該小時
     chartBox.addEventListener('click', function (ev) {
       var t = ev.target;
       if (!t || t.tagName.toLowerCase() !== 'rect') { return; }
       var h = t.getAttribute('data-hour');
       if (h === null) { return; }
-      selectedHour = h;
-      highlight();
-      fetch('/api/hour?hour=' + encodeURIComponent(h), { cache: 'no-store' })
-        .then(function (r) { if (!r.ok) { throw new Error('HTTP ' + r.status); } return r.json(); })
-        .then(function (d) { showHourDetail(d); })
-        .catch(function () { showHourError(h); });
+      if (h === selHour) { backToLive(); } else { enterHour(h); }
     });
+  }
+  if (liveBtn) {
+    liveBtn.addEventListener('click', function () { backToLive(); });
   }
   setInterval(refresh, 15000);
   document.addEventListener('visibilitychange', function () { if (!document.hidden) { refresh(); } });
@@ -702,6 +736,8 @@ var LIVE = true;
         $updHint = '靜態快照（不會自動更新）'
         $updInit = '靜態快照（' + $s.generatedLocal + '）'
         $hourBox = ''
+        $chartHead = '<h2>最近 24 小時 C: 落盤</h2>'
+        $liveCss = ''
         $js = @"
 var LIVE = false;
 (function () {
@@ -731,6 +767,7 @@ th{color:#8b949e;font-weight:500;font-size:12px}
 .files{color:#8b949e;font-size:12px;max-width:640px;word-break:break-all}
 .muted{color:#8b949e}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+$liveCss
 </style></head><body>
 <h1>CWatch — C 碟寫入監控</h1>
 <div class="muted">頁面產生：$($s.generatedLocal) · $updHint · <span id="upd">$updInit</span></div>
@@ -744,7 +781,7 @@ th{color:#8b949e;font-weight:500;font-size:12px}
   <div class="card"><div class="k">ETW 累計位元組</div><div class="v" style="font-size:15px" id="bytesseen">$($s.collector.bytesSeenText)</div></div>
 </div>
 
-<h2>最近 24 小時 C: 落盤</h2>
+$chartHead
 <div id="chart">$($s.svg)</div>
 $hourBox
 

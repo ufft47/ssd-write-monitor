@@ -3,7 +3,7 @@
 > 每項都記「估時 / 實際 / 倍率 / 驗收證據」。完成的任務從 `TODO.md` 移到這裡。
 > **估時＝人類工程師的估計工時（推估）；實際＝本次工作階段的牆上時間。**
 > 倍率＝實際 ÷ 估時。依 `EXPERIENCE.md` 第 38 條：純邏輯類通常 0.2×、UI 類 0.5×、驗證整合類 0.8×。
-> 最後更新：2026-11-16 01:38
+> 最後更新：2026-11-16 12:01
 
 ---
 
@@ -52,7 +52,13 @@
 |---|---|---|---|---|---|
 | D1 | Edge `User Data` 搬 D:（junction，工具 `move-edge-ud.ps1`） | 未預估 | 約 11 分 | — | Junction → `D:\MX500\edge\User Data`；18,663 檔 / 1.89 GB，逐檔比對缺 **0**、大小不同 **0**、落地測試 **是**；備份 `User Data.bak-20261116-013507`（1.89 GB）留觀察期 |
 
-> 2026-11-16 只有這一項，估時未預估，所以不算倍率、也不列當日合計。
+### E. 診斷：explorer.exe 吃 41–43% CPU
+
+| # | 項目 | 估時 | 實際 | 倍率 | 驗收證據 |
+|---|---|---|---|---|---|
+| E1 | 工作列圖示快取（`TrayNotify`）膨脹 → `reset-traynotify.ps1` | 未預估 | 約 2 小時（含 xperf 診斷） | — | xperf 堆疊：`CTrayNotify::_InsertNotify` → `CTrayItemRegistry::DoesGUIDIconMatchPathOrIdentity` → `TNIdentity::GetIdentity` → `WINTRUST!WTGetSignatureInfo` → SHA-256（75%）；刪 `IconStreams`/`PastIconsStream` 並重啟 explorer 後 **41–43% → 1–3%**，`PastIconsStream` 929,606 → 47,392 bytes |
+
+> 2026-11-16 的兩項都估時未預估，所以不算倍率、也不列當日合計。
 
 ---
 

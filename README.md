@@ -117,6 +117,7 @@ D:\dev\disk-monitor\
 | `move-asus-ime-log.ps1` | ASUS 輸入法 ETW 追蹤：`-StopTrace` 或把 log 搬 D: |
 | `move-edge-ud.ps1` | Edge 的 `User Data` 搬 D:（junction；`-DryRun` / `-Apply` / `-Verify` / `-Revert`） |
 | `move-pagefile.ps1` | 主分頁檔搬 D:（**業主擱置**） |
+| `reset-traynotify.ps1` | 重置工作列圖示快取（`TrayNotify`）修 explorer 吃 CPU（`-DryRun` / `-Apply` / `-Verify` / `-Revert`） |
 | `safemode.ps1` | 指定／取消下一次開機進安全模式（WinRE 缺失時的替代） |
 | `check-avg-migration.ps1` | AVG 搬移後續健康檢查（可註冊每日排程） |
 | `purge-leftovers.ps1` | 提權逐項清理搬移殘留 |
@@ -810,6 +811,54 @@ Edge 只是把第 4 個瀏覽器 profile 也搬過去。工具：`move-edge-ud.p
 2. **Edge 大版本更新後再跑一次 `-Verify`**（更新器不碰 `User Data`，但它是唯一還會動到 profile 的東西）。
 3. 期滿且確認正常才刪 `User Data.bak-20261116-013507`。**在那之前 C: 的實際釋放是 0**
    —— 1.89 GB 只是從「使用中的 profile」變成「備份」，兩者都還在 C:。
+
+---
+
+## 工作列圖示快取（`TrayNotify`）膨脹 → explorer.exe 吃 41–43% CPU（2026-11-16）
+
+`explorer.exe` 曾持續吃 41–43% 單核。xperf（含微軟符號）把熱點指到同一個地方：
+
+```
+CTrayNotify::_InsertNotify
+  → CTrayItemRegistry::DoesGUIDIconMatchPathOrIdentity
+    → TNIdentity::GetIdentity
+      → WINTRUST!WTGetSignatureInfo → SHA-256          (75%)
+```
+
+意思是：工作列圖示被**反覆重新註冊**，每註冊一次 explorer 就對那支 exe 重算簽章
+（例：`AVGUI.exe` 22.9 MB）。而會反覆重註冊的原因是工作列圖示快取壞掉／膨脹：
+
+| `HKCU\...\CurrentVersion\TrayNotify` | 膨脹後 | 重置後 |
+|---|---|---|
+| `IconStreams` | 83,660 bytes | 39,380 bytes |
+| `PastIconsStream` | 929,606 bytes（約 908 KB） | 47,392 bytes（約 46 KB） |
+| `explorer.exe` CPU（單核） | **41–43%** | **1–3%** |
+
+刪掉這兩個值並重啟 explorer 後，Windows 會自己重建新的快取 —— 不需要登錄修補、不需要重開機。
+
+**用法**（`reset-traynotify.ps1`，只碰這兩個值，其他登錄值一律不動）：
+
+```powershell
+# 看現況（值大小、explorer 10 秒 CPU、是否超過 200 KB 門檻）；不改任何東西
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\disk-monitor\reset-traynotify.ps1 -DryRun
+
+# 備份 → 刪值 → 重啟 explorer → 量 30 秒 CPU
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\disk-monitor\reset-traynotify.ps1 -Apply
+
+# 事後檢查（結論 OK / WARN / PROBLEM，exit 0 / 1 / 2）
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\disk-monitor\reset-traynotify.ps1 -Verify
+
+# 需要時從最新備份寫回（找不到備份會明確報錯）
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\disk-monitor\reset-traynotify.ps1 -Revert
+```
+
+- 判準：`PastIconsStream` **> 200 KB** 視為可疑；`-Verify` 另外要求 explorer CPU < 5%。
+- 備份存 `<Root>\logs\traynotify-backup-<時間>\<值名>.bin`（`[IO.File]::WriteAllBytes`），**不會自動刪除**；
+  備份失敗就中止，不會刪任何東西。
+- **副作用**：重啟 explorer 會關閉已開的資料夾視窗，工作列圖示的可見性會重設
+  （釘選的程式還在，只是「顯示隱藏的圖示」那類設定回到預設）。
+- 這支腳本只寫 `HKCU`，**不需要管理員**；建議就用一般權限跑 —— kill 掉的 explorer 由 Windows
+  接管重啟，從提權內容手動 `Start-Process explorer.exe` 不一定會回到使用者的非提權桌面。
 
 ---
 

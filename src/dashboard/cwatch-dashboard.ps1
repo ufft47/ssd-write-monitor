@@ -181,9 +181,94 @@ function Get-Heartbeat {
     try { return Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
 }
 
+# ---------- 某一小時的 ETW 明細（點長條圖用） ----------
+# 這張表是 ETW 的「邏輯寫入」，與長條圖的 PhysicalDisk「實體落盤」是不同量測，不能相加。
+# 快取：$script:hourCache[date|hour] = @{ Mtime; Value }；attrib 檔 LastWriteTimeUtc 沒變就重用。
+$script:hourCache = @{}
+function Get-HourDetail([string]$date, [int]$hour) {
+    $label = ('{0:00}:00–{0:00}:59' -f $hour)
+    $file = Join-Path $Root ('data\attrib\' + $date + '.csv')
+    $empty = [pscustomobject]@{
+        date = $date; hour = $hour; label = $label
+        totalBytes = [double]0; totalBytesText = (Format-Bytes 0)
+        totalOps = [double]0; totalOpsText = '0'
+        groups = 0; rows = @()
+    }
+    if (-not (Test-Path -LiteralPath $file)) { return $empty }
+
+    $mtime = (Get-Item -LiteralPath $file).LastWriteTimeUtc
+    $key = $date + '|' + $hour
+    if ($script:hourCache.ContainsKey($key)) {
+        $hit = $script:hourCache[$key]
+        if ($hit.Mtime -eq $mtime) { return $hit.Value }
+    }
+
+    $hh = ('{0:00}' -f $hour)
+    $agg = @{}
+    $totalBytes = [double]0
+    $totalOps = [double]0
+    # 整天檔（約 8 MB）；欄位：minute,pid,process,volume,path,bytes,ops（path 可能含逗號）
+    foreach ($ln in [IO.File]::ReadAllLines($file, [Text.Encoding]::UTF8)) {
+        if ($ln.Length -lt 20) { continue }
+        if ($ln.StartsWith('minute,')) { continue }
+        $p = $ln.Split(',')
+        if ($p.Length -lt 6) { continue }
+        $minute = $p[0]
+        if ($minute.Length -lt 16) { continue }
+        if ($minute.Substring(11, 2) -ne $hh) { continue }
+        $opsIdx = $p.Length - 1
+        $bytesIdx = $p.Length - 2
+        $b = 0.0; $o = 0.0
+        if (-not [double]::TryParse($p[$bytesIdx], [ref]$b)) { continue }
+        if (-not [double]::TryParse($p[$opsIdx], [ref]$o)) { continue }
+        $proc = $p[2]
+        $vol = $p[3]
+        $path = ($p[4..($bytesIdx - 1)] -join ',')
+        $path = $path.Trim('"')
+        $k = $proc + '|' + $vol
+        if (-not $agg.ContainsKey($k)) {
+            $agg[$k] = [pscustomobject]@{ Process = $proc; Volume = $vol; Bytes = [double]0; Ops = [double]0; Files = @{} }
+        }
+        $agg[$k].Bytes += $b
+        $agg[$k].Ops += $o
+        if ($path -ne '(其他)' -and $path -ne '(unknown)') {
+            if (-not $agg[$k].Files.ContainsKey($path)) { $agg[$k].Files[$path] = [double]0 }
+            $agg[$k].Files[$path] += $b
+        }
+        $totalBytes += $b
+        $totalOps += $o
+    }
+
+    $rows = @()
+    foreach ($a in @($agg.Values | Sort-Object Bytes -Descending | Select-Object -First 20)) {
+        $files = @()
+        foreach ($t in @($a.Files.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3)) {
+            $files += [pscustomobject]@{ path = [string]$t.Key; bytes = [double]$t.Value; bytesText = (Format-Bytes $t.Value) }
+        }
+        $rows += [pscustomobject]@{
+            process   = [string]$a.Process
+            volume    = [string]$a.Volume
+            bytes     = [double]$a.Bytes
+            bytesText = (Format-Bytes $a.Bytes)
+            ops       = [double]$a.Ops
+            opsText   = ('{0:N0}' -f $a.Ops)
+            files     = $files
+        }
+    }
+
+    $value = [pscustomobject]@{
+        date = $date; hour = $hour; label = $label
+        totalBytes = $totalBytes; totalBytesText = (Format-Bytes $totalBytes)
+        totalOps = $totalOps; totalOpsText = ('{0:N0}' -f $totalOps)
+        groups = $agg.Count; rows = $rows
+    }
+    $script:hourCache[$key] = [pscustomobject]@{ Mtime = $mtime; Value = $value }
+    return $value
+}
+
 # ---------- 收集資料：HTML 與 JSON 的唯一來源 ----------
 # 回傳一個物件；JSON 直接序列化它，HTML 只是把它排版。兩邊不會各算一份。
-function Get-DashboardState {
+function Get-DashboardState([bool]$Live = $true) {
     $now = Get-Date
     $today = $now.Date
     # 讀整天（檔案很小，約 8k 行/日）；先前只讀尾巴 400 行，會讓「今日」只算到最近一小時
@@ -313,6 +398,7 @@ function Get-DashboardState {
     foreach ($h in $hourly) { if ($h.Bytes -gt $maxH) { $maxH = $h.Bytes } }
 
     # sparkline（自家產生、不含任何使用者輸入，前端可以直接 innerHTML）
+    # 只有線上模式才加 data-hour／cursor：-Once 的靜態快照不可以留下互動程式碼
     $svg = ''
     if ($hourly.Count -gt 1 -and $maxH -gt 0) {
         $w = 720; $hgt = 90; $bw = [math]::Floor($w / $hourly.Count) - 2
@@ -322,8 +408,10 @@ function Get-DashboardState {
             $bh = [int](($x.Bytes / $maxH) * ($hgt - 10))
             if ($bh -lt 1) { $bh = 1 }
             $xpos = 4 + $i * ($bw + 2)
-            $bars += ('<rect x="{0}" y="{1}" width="{2}" height="{3}" fill="#1f6feb" rx="1"><title>{4}  {5}</title></rect>' -f `
-                $xpos, ($hgt - $bh), $bw, $bh, $x.When, (Format-Bytes $x.Bytes))
+            $dyn = ''
+            if ($Live -and $x.When.Length -ge 13) { $dyn = (' data-hour="{0}" style="cursor:pointer"' -f $x.When.Substring(11, 2)) }
+            $bars += ('<rect x="{0}" y="{1}" width="{2}" height="{3}" fill="#1f6feb" rx="1"{6}><title>{4}  {5}</title></rect>' -f `
+                $xpos, ($hgt - $bh), $bw, $bh, $x.When, (Format-Bytes $x.Bytes), $dyn)
             $i++
         }
         $svg = ('<svg width="{0}" height="{1}" viewBox="0 0 {0} {1}">{2}</svg>' -f $w, $hgt, $bars)
@@ -423,6 +511,7 @@ function New-DashboardHtml($s, [bool]$Live = $true) {
     if ($Live) {
         $updHint = '每 15 秒自動更新'
         $updInit = '最後更新 ' + $s.clock
+        $hourBox = '<div id="hourDetail"></div>'
         $js = @"
 var LIVE = true;
 (function () {
@@ -494,6 +583,7 @@ var LIVE = true;
     setText('susbytes', s.suspectText);
     var ch = el('chart');
     if (ch && typeof s.svg === 'string' && s.svg.length) { ch.innerHTML = s.svg; }
+    highlight();
     buildRows(el('rowsC'), s.processesC, true);
     buildRows(el('rowsAll'), s.processes, false);
   }
@@ -515,6 +605,95 @@ var LIVE = true;
       .catch(function () { markFail(); })
       .then(function () { busy = false; });
   }
+  var selectedHour = null;
+  var chartBox = document.getElementById('chart');
+  function highlight() {
+    if (!chartBox) { return; }
+    var rects = chartBox.querySelectorAll('rect[data-hour]');
+    for (var i = 0; i < rects.length; i++) {
+      if (selectedHour !== null && rects[i].getAttribute('data-hour') === selectedHour) {
+        rects[i].setAttribute('fill', '#f0883e');
+      } else {
+        rects[i].setAttribute('fill', '#1f6feb');
+      }
+    }
+  }
+  function showHourDetail(d) {
+    var box = document.getElementById('hourDetail');
+    if (!box) { return; }
+    while (box.firstChild) { box.removeChild(box.firstChild); }
+    var head = document.createElement('div');
+    head.className = 'muted';
+    head.style.margin = '10px 0 6px';
+    head.textContent = d.label + '　合計 ' + d.totalBytesText + '（ETW 歸因：邏輯寫入，非實體落盤；' + d.groups + ' 筆）';
+    box.appendChild(head);
+    var rows = asArray(d.rows);
+    if (!rows.length) {
+      var none = document.createElement('div');
+      none.className = 'muted';
+      none.textContent = '這一小時沒有歸因資料';
+      box.appendChild(none);
+      return;
+    }
+    var tbl = document.createElement('table');
+    var thead = document.createElement('thead');
+    var trh = document.createElement('tr');
+    var hs = ['程式', '磁碟區', '寫入', '操作數', '前 3 個檔案'];
+    for (var c = 0; c < hs.length; c++) {
+      var th = document.createElement('th');
+      if (c === 2 || c === 3) { th.className = 'num'; }
+      th.textContent = hs[c];
+      trh.appendChild(th);
+    }
+    thead.appendChild(trh);
+    tbl.appendChild(thead);
+    var tbody = document.createElement('tbody');
+    for (var j = 0; j < rows.length; j++) {
+      var p = rows[j];
+      var tr = document.createElement('tr');
+      var tdP = document.createElement('td'); tdP.textContent = p.process; tr.appendChild(tdP);
+      var tdV = document.createElement('td'); tdV.className = 'vol'; tdV.textContent = p.volume; tr.appendChild(tdV);
+      var tdB = document.createElement('td'); tdB.className = 'num'; tdB.textContent = p.bytesText; tr.appendChild(tdB);
+      var tdO = document.createElement('td'); tdO.className = 'num muted'; tdO.textContent = p.opsText; tr.appendChild(tdO);
+      var tdF = document.createElement('td'); tdF.className = 'files';
+      var fl = asArray(p.files);
+      for (var k = 0; k < fl.length; k++) {
+        if (k > 0) { tdF.appendChild(document.createElement('br')); }
+        tdF.appendChild(document.createTextNode(fl[k].path));
+        var sp = document.createElement('span'); sp.className = 'muted';
+        sp.textContent = ' ' + fl[k].bytesText; tdF.appendChild(sp);
+      }
+      tr.appendChild(tdF);
+      tbody.appendChild(tr);
+    }
+    tbl.appendChild(tbody);
+    box.appendChild(tbl);
+  }
+  function showHourError(h) {
+    var box = document.getElementById('hourDetail');
+    if (!box) { return; }
+    while (box.firstChild) { box.removeChild(box.firstChild); }
+    var e = document.createElement('div');
+    e.className = 'muted';
+    e.style.color = '#f85149';
+    e.textContent = '讀取 ' + h + ' 時失敗';
+    box.appendChild(e);
+  }
+  if (chartBox) {
+    // 事件委派：綁在容器上，圖表每 15 秒被 innerHTML 換掉也不受影響
+    chartBox.addEventListener('click', function (ev) {
+      var t = ev.target;
+      if (!t || t.tagName.toLowerCase() !== 'rect') { return; }
+      var h = t.getAttribute('data-hour');
+      if (h === null) { return; }
+      selectedHour = h;
+      highlight();
+      fetch('/api/hour?hour=' + encodeURIComponent(h), { cache: 'no-store' })
+        .then(function (r) { if (!r.ok) { throw new Error('HTTP ' + r.status); } return r.json(); })
+        .then(function (d) { showHourDetail(d); })
+        .catch(function () { showHourError(h); });
+    });
+  }
   setInterval(refresh, 15000);
   document.addEventListener('visibilitychange', function () { if (!document.hidden) { refresh(); } });
 })();
@@ -522,6 +701,7 @@ var LIVE = true;
     } else {
         $updHint = '靜態快照（不會自動更新）'
         $updInit = '靜態快照（' + $s.generatedLocal + '）'
+        $hourBox = ''
         $js = @"
 var LIVE = false;
 (function () {
@@ -566,6 +746,7 @@ th{color:#8b949e;font-weight:500;font-size:12px}
 
 <h2>最近 24 小時 C: 落盤</h2>
 <div id="chart">$($s.svg)</div>
+$hourBox
 
 <h2>C: 寫入排行（<span id="attrlabel1">$($s.attrLabel)</span>，ETW 歸因）</h2>
 <div class="muted" style="margin-bottom:8px" id="cov">$($s.coverageNote)</div>
@@ -599,7 +780,7 @@ $js
 
 # 相容舊呼叫端（-Once 與外部工具都叫這支）
 function New-Dashboard {
-    return New-DashboardHtml (Get-DashboardState) $false
+    return New-DashboardHtml (Get-DashboardState $false) $false
 }
 
 # ---------- 主流程 ----------
@@ -630,26 +811,60 @@ while ($true) {
             if ([string]::IsNullOrEmpty($h)) { break }
         }
 
-        # 只認路徑；查詢字串忽略
+        # 只認路徑；查詢字串另外解析（/api/hour 需要 hour/date）
         $reqPath = '/'
+        $reqQuery = ''
         if ($requestLine) {
             $bits = $requestLine.Split(' ')
             if ($bits.Length -ge 2) { $reqPath = $bits[1] }
         }
         $q = $reqPath.IndexOf('?')
-        if ($q -ge 0) { $reqPath = $reqPath.Substring(0, $q) }
+        if ($q -ge 0) {
+            $reqQuery = $reqPath.Substring($q + 1)
+            $reqPath = $reqPath.Substring(0, $q)
+        }
+        $query = @{}
+        foreach ($kv in ($reqQuery -split '&')) {
+            if (-not $kv) { continue }
+            $eq = $kv.IndexOf('=')
+            if ($eq -lt 0) { $query[$kv] = '' }
+            else { $query[$kv.Substring(0, $eq)] = [System.Uri]::UnescapeDataString($kv.Substring($eq + 1)) }
+        }
 
-        $state = Get-DashboardState
+        $status = 200
         if ($reqPath -eq '/api/state') {
-            $body = ($state | ConvertTo-Json -Depth 8 -Compress)
+            $body = (Get-DashboardState | ConvertTo-Json -Depth 8 -Compress)
             $ctype = 'application/json; charset=utf-8'
+        } elseif ($reqPath -eq '/api/hour') {
+            $ctype = 'application/json; charset=utf-8'
+            $hourNum = -1
+            $hourTxt = [string]$query['hour']
+            if (-not [int]::TryParse($hourTxt, [ref]$hourNum) -or $hourNum -lt 0 -or $hourNum -gt 23) {
+                $status = 400
+                $body = '{"error":"hour must be an integer 0-23"}'
+            } else {
+                $dateTxt = (Get-Date).ToString('yyyy-MM-dd')
+                if ($query.ContainsKey('date') -and $query['date']) { $dateTxt = [string]$query['date'] }
+                $dt = [datetime]::MinValue
+                $okDate = [datetime]::TryParseExact($dateTxt, 'yyyy-MM-dd', $inv,
+                    [System.Globalization.DateTimeStyles]::None, [ref]$dt)
+                if (-not $okDate) {
+                    $status = 400
+                    $body = '{"error":"date must be YYYY-MM-DD"}'
+                } else {
+                    $body = (Get-HourDetail $dateTxt $hourNum | ConvertTo-Json -Depth 8 -Compress)
+                }
+            }
         } else {
-            $body = New-DashboardHtml $state
+            $body = New-DashboardHtml (Get-DashboardState)
             $ctype = 'text/html; charset=utf-8'
         }
 
         $bytes = [Text.Encoding]::UTF8.GetBytes($body)
-        $header = "HTTP/1.1 200 OK`r`nContent-Type: $ctype`r`nContent-Length: $($bytes.Length)`r`nCache-Control: no-store, no-cache, must-revalidate, max-age=0`r`nPragma: no-cache`r`nExpires: 0`r`nConnection: close`r`n`r`n"
+        $reason = 'OK'
+        if ($status -eq 400) { $reason = 'Bad Request' }
+        elseif ($status -eq 404) { $reason = 'Not Found' }
+        $header = "HTTP/1.1 $status $reason`r`nContent-Type: $ctype`r`nContent-Length: $($bytes.Length)`r`nCache-Control: no-store, no-cache, must-revalidate, max-age=0`r`nPragma: no-cache`r`nExpires: 0`r`nConnection: close`r`n`r`n"
         $hb2 = [Text.Encoding]::ASCII.GetBytes($header)
         $stream.Write($hb2, 0, $hb2.Length)
         $stream.Write($bytes, 0, $bytes.Length)

@@ -18,7 +18,7 @@
 
 | 日期 | 類型 | 內容 | Commit |
 |---|---|---|---|
-| 2026-11-16 | chore | 從公開版移除 11 支腳本（8 支作者本機環境清理：網盤/AVG/Autodesk/殘留；另 reset-traynotify、safemode、dump-events 與量測無關或依賴缺失），避免與量測主題混淆 | `(待填)` |
+| 2026-11-16 | chore | 從公開版移除 11 支腳本（8 支作者本機環境清理：網盤/AVG/Autodesk/殘留；另 reset-traynotify、safemode、dump-events 與量測無關或依賴缺失），避免與量測主題混淆；同時新增 `tools/github-watch.ps1`（自動監看 issue） | `61fd5a8` |
 | 2026-11-16 | **首次發佈** | public repo 建立（MIT）：中英雙語說明（`README.md` / `README.zh-TW.md`）、英文版 README、`LICENSE`、`NOTICE.md`（微軟 DLL 授權）、去識別（`<host>\<user>` → `<user>`、`C:\Users\<user>` → `%USERPROFILE%`）、`.gitignore` 排除執行期資料（`data/ reports/ logs/`）與編譯產物、新增本檔。推送 50 個檔案。 | `3a9ef7b` |
 | 2026-11-16 | fix | `remove-quark.ps1` / `remove-avg-browser.ps1` / `purge-leftovers.ps1` 移除寫死的 `C:\Users\<user>`，改用 `$env:LOCALAPPDATA` / `$env:APPDATA`（同機展開值不變，其他使用者才找得到自己的目錄；DryRun 已核對） | `fa95894` |
 

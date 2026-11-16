@@ -9,11 +9,11 @@
       C:\ProgramData\ASUS\AsusIME\log.bak-20261115-061446   259.8 MB  ASUS 日誌搬家時的舊副本
       C:\ProgramData\AVG.bak-20261115-075503              1,057.1 MB  舊 AVG ProgramData
       D:\MX500\avg\ProgramData                            1,056.5 MB  AVG 重建後留下的孤兒
-      C:\Users\ufft4\AppData\Local\AVG\Browser              360.8 MB  AVG Browser 已被移除，留下的 User Data
+      %USERPROFILE%\AppData\Local\AVG\Browser              360.8 MB  AVG Browser 已被移除，留下的 User Data
 
     為什麼需要這支腳本（一個實測修正）：
     先前把「刪不掉」全部歸因於 AVG 自我保護（avgSP）。實際上**至少兩項只是權限問題** ——
-    助手是以 `WIN10-MX5000\luke`（非管理員）執行，而：
+    助手是以 `<user>`（非管理員）執行，而：
 
       C:\ProgramData\ASUS\...\log.bak-...    Users = ReadAndExecute + Write（**沒有 Delete**）
       C:\ProgramData\AVG.bak-...             Users = ReadAndExecute（沒有 Delete）

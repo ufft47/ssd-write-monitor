@@ -3,7 +3,7 @@
 # 為什麼需要這一步：
 #   collector 用 (pid, FileObject) 對照表解檔名，而 FileObject 指標會被核心回收再配給
 #   別的檔案。實測（2026-11-15）代價很大：Robocopy 在 F: 的 22.9 GB 被記成 C: 底下
-#   四個根本不存在的路徑（C:\Users\ufft4\.claude\ide 等），讓 C: 的歸因總量
+#   四個根本不存在的路徑（%USERPROFILE%\.claude\ide 等），讓 C: 的歸因總量
 #   變成物理量的 1.9 倍。
 #   根因（FileKey 交叉驗證）之後再修；這支腳本先用「路徑可信度」把可疑列扣掉，
 #   並把扣掉多少、扣了哪些明確印出來，不偷偷丟資料。

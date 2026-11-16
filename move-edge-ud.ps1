@@ -6,14 +6,14 @@
 .DESCRIPTION
     2026-11-16 實測（本機）：
 
-      C:\Users\ufft4\AppData\Local\Microsoft\Edge\User Data
+      %USERPROFILE%\AppData\Local\Microsoft\Edge\User Data
         1.89 GB / 18,663 個檔案
         LinkType 空（實體目錄，尚未搬過）
         msedge.exe 進程 0 個（搬移時仍會重新檢查）
       D:\MX500\edge 不存在（要建立）；D: 可用 208.8 GB
 
       同類既有案例（照這個模式做，已穩定運作）：
-        C:\Users\ufft4\AppData\Local\Google\Chrome\User Data
+        %USERPROFILE%\AppData\Local\Google\Chrome\User Data
           已是 Junction -> D:\MX500\chrome\User Data
 
     為什麼要搬：Edge 的 profile（Cache、Code Cache、GPU Cache、Service Worker…）

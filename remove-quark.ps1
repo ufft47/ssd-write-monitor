@@ -5,10 +5,10 @@
 
 .DESCRIPTION
     2026-11-15 實測：
-      C:\Users\ufft4\AppData\Local\Programs\Quark     2,539 MB（程式本體，含 unins000.exe）
-      C:\Users\ufft4\AppData\Local\Quark              452 MB（快取／User Data，最後寫入 2026-06-27）
-      C:\Users\ufft4\AppData\Local\QuarkUpdater        48 MB（更新器）
-      C:\Users\ufft4\AppData\Roaming\Quark             48 MB（設定）
+      %USERPROFILE%\AppData\Local\Programs\Quark     2,539 MB（程式本體，含 unins000.exe）
+      %USERPROFILE%\AppData\Local\Quark              452 MB（快取／User Data，最後寫入 2026-06-27）
+      %USERPROFILE%\AppData\Local\QuarkUpdater        48 MB（更新器）
+      %USERPROFILE%\AppData\Roaming\Quark             48 MB（設定）
       登錄檔 HKCU\SOFTWARE\Quark                       Brand=clouddrive、InstallTimes=40
       自啟：HKCU\...\Run 的 `quark`（--launch-from=loginitem）與
             `QuarkUpdaterTaskUser1.0.0.18`、排程工作 \QuarkUpdaterUser\QuarkUpdater\
@@ -16,7 +16,7 @@
 
     這是**使用者範圍安裝**（在 AppData 底下），所以不需要管理員權限。
     卸載字串（Inno Setup）：
-      "C:\Users\ufft4\AppData\Local\Programs\Quark\unins000.exe" --brand-clouddrive /SILENT --fake-silent /LOG
+      "%USERPROFILE%\AppData\Local\Programs\Quark\unins000.exe" --brand-clouddrive /SILENT --fake-silent /LOG
 
     本腳本順序：
       1. 備份 HKCU\SOFTWARE\Quark（reg export）與 Roaming\Quark 到 logs\quark-backup-<時間>\

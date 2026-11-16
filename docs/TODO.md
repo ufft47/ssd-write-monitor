@@ -20,7 +20,7 @@
 
 | 項目 | 內容 | 需要什麼 |
 |---|---|---|
-| 刪 AVG 殘留 1,417 MB | `D:\MX500\avg\ProgramData`（1,056.5 MB）＋ `AppData\Local\AVG\Browser`（360.8 MB）。已提權試過，兩項都被 `avgSP` 拒絕存取 | **安全模式**，一行 `Remove-Item` |
+| 刪 AVG 殘留 1,417 MB | `D:\SSD\avg\ProgramData`（1,056.5 MB）＋ `AppData\Local\AVG\Browser`（360.8 MB）。已提權試過，兩項都被 `avgSP` 拒絕存取 | **安全模式**，一行 `Remove-Item` |
 | 刪 AVG 備份 1,967.6 MB | `C:\Program Files\AVG.bak-20261115-075637` | 觀察期滿（11-18）＋安全模式 |
 
 > 兩件可以排在同一次安全模式開機做，省一次重開機。

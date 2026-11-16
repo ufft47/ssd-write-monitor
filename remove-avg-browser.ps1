@@ -6,7 +6,7 @@
 .DESCRIPTION
     2026-11-15 實測：
       C:\Program Files (x86)\AVG\Browser                    1,245 MB（程式本體）
-      C:\Users\ufft4\AppData\Local\AVG\Browser\User Data    junction -> D:\MX500\avg-browser\User Data
+      %USERPROFILE%\AppData\Local\AVG\Browser\User Data    junction -> D:\MX500\avg-browser\User Data
       D:\MX500\avg-browser\User Data                        2,049 MB（9,647 檔，含 Profile 1 904 MB）
       排程工作 AVGBrowserProtectS-1-5-21-...-1001
         -> C:\Program Files (x86)\AVG\Browser\Application\AVGBrowserProtect.exe --runonce

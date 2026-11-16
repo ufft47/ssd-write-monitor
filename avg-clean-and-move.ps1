@@ -45,7 +45,7 @@
     並開始往 C: 寫（08:00–08:02）。腳本當下的驗證是真的，只是 AVG 還沒跑起來。
 
     同時 AVG 那次重建也拆掉了
-    C:\Users\ufft4\AppData\Local\AVG\Browser\User Data 的 junction，
+    %USERPROFILE%\AppData\Local\AVG\Browser\User Data 的 junction，
     並把 AVG Secure Browser 整個移除（程式目錄、卸載登錄、排程工作全部消失）。
 
     換句話說：**AVG 只接受 Program Files\AVG 是 junction，不接受 ProgramData\AVG。**

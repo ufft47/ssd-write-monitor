@@ -42,7 +42,7 @@
 | 路徑型態 | 問題 | 實例 |
 |---|---|---|
 | `X:\Device\HarddiskVolumeN\...` | 磁碟區相對路徑被冠上磁碟機代號 | Robocopy 寫 F: 被記成 `C:\Device\...` |
-| 是**目錄** | 目錄不是寫入目標 | `C:\Users\ufft4\.claude\ide`（9,470 MB） |
+| 是**目錄** | 目錄不是寫入目標 | `%USERPROFILE%\.claude\ide`（9,470 MB） |
 | **不存在**且不在暫存區 | ETW 幻影 | `endpoints.json`（7,576 MB）、`ApplicationInsightsDiagnostics.json`（4,621 MB） |
 
 > 症狀：排行榜第一名是 Robocopy 59.35 GB、具名覆蓋率 7,765%。

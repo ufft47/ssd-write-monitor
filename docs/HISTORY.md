@@ -26,7 +26,7 @@
 | B1 | 關閉 Autodesk Access 更新器（1.87 GB/日） | 25 分 | 12 分 | 0.48× | 服務 `Autodesk Access Service Host` = `Stopped` / `Disabled`，無 `AdODIS` 進程 |
 | B2 | AVG 垃圾清理（崩潰傾印 300 檔） | 40 分 | 15 分 | 0.38× | 實刪 **3,600 MB**；`Antivirus\log` 3,988 → 388.7 MB；AVG 四服務仍 Running |
 | B3 | 移除夸克网盘 | 40 分 | 6 分 | 0.15× | C: **+3.01 GB**（124.30 → 127.31 GB）；4 個目錄消失、懸空引用 5 處全清 |
-| B4 | `Program Files\AVG` → D:（安全模式） | 150 分 | 47 分（07:23–08:10，含兩次失敗） | **0.31×** | junction 存活；D: 上 `defs\26111412_stream\*.bin` 08:02:28 仍被寫入；安全性中心登記路徑 = `D:\MX500\avg\ProgramFiles\Antivirus\wsc_proxy.exe` |
+| B4 | `Program Files\AVG` → D:（安全模式） | 150 分 | 47 分（07:23–08:10，含兩次失敗） | **0.31×** | junction 存活；D: 上 `defs\26111412_stream\*.bin` 08:02:28 仍被寫入；安全性中心登記路徑 = `D:\SSD\avg\ProgramFiles\Antivirus\wsc_proxy.exe` |
 | B5 | ASUS IME ETW 追蹤停止 | 30 分 | 12 分 | 0.4× | `.etl` 凍結在 231.88 MB、60 秒 +0.00 MB；`logman query` 回 `Data Collector Set was not found`；打字正常 |
 | B6 | ASUS 日誌搬 D: | 30 分 | 12 分 | 0.4× | C:/D: 兩條路徑指向同一檔（286.250 MB / 同一 `LastWriteTime`）；D: 上 `.etl` 30 秒 +0.375 MB |
 | B7 | 殘留清理（兩批） | 40 分 | 15 分 | 0.38× | 第一批刪 D: 孤兒 **2,062.5 MB**；第二批提權刪 **1,317 MB**（ASUS `log.bak` 260 + `ProgramData\AVG.bak` 1,057） |
@@ -50,7 +50,7 @@
 
 | # | 項目 | 估時 | 實際 | 倍率 | 驗收證據 |
 |---|---|---|---|---|---|
-| D1 | Edge `User Data` 搬 D:（junction，工具 `move-edge-ud.ps1`） | 未預估 | 約 11 分 | — | Junction → `D:\MX500\edge\User Data`；18,663 檔 / 1.89 GB，逐檔比對缺 **0**、大小不同 **0**、落地測試 **是**；備份 `User Data.bak-20261116-013507`（1.89 GB）留觀察期 |
+| D1 | Edge `User Data` 搬 D:（junction，工具 `move-edge-ud.ps1`） | 未預估 | 約 11 分 | — | Junction → `D:\SSD\edge\User Data`；18,663 檔 / 1.89 GB，逐檔比對缺 **0**、大小不同 **0**、落地測試 **是**；備份 `User Data.bak-20261116-013507`（1.89 GB）留觀察期 |
 
 ### E. 診斷：explorer.exe 吃 41–43% CPU
 

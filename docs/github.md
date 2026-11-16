@@ -1,4 +1,4 @@
-# GitHub 更新紀錄
+﻿# GitHub 更新紀錄
 
 > 這份檔案記錄**本專案在 GitHub 上的每一次更新**，以及公開 issue 的處理結果。
 > 使用者說明在 [`../README.md`](../README.md)（English）與 [`../README.zh-TW.md`](../README.zh-TW.md)（中文）。

@@ -112,17 +112,17 @@ disk-monitor/
 └── logs/                         (gitignored) script logs
 ```
 
-## Notes on the move / cleanup helpers
+## Notes on the move helpers
 
-`move-*.ps1`, `avg-*.ps1`, `remove-*.ps1`, `purge-leftovers.ps1` and `reset-traynotify.ps1`
-are **real scripts used on the author's machine**. They contain concrete paths such as
-`D:\<target>\...` and references to specific products (AVG, ASUS IME, Quark, Edge, Chrome).
-They are included as worked examples — read them, then change the paths for your own system.
+`move-edge-ud.ps1` (Edge profile), `move-asus-ime-log.ps1` (ASUS IME ETW log) and
+`move-pagefile.ps1` (page file) are **real scripts used on the author's machine**. They carry
+concrete paths such as `D:\<target>\...`; read them, then change the paths for your system.
 Nothing in the measurement pipeline depends on them.
 
-`reset-traynotify.ps1` is the one exception that is widely useful as-is: it fixes
-`explorer.exe` burning 41–43 % of a core by resetting the bloated `TrayNotify` icon cache
-(see the Chinese README for the xperf stack).
+Not included: the author's cleanup and OS-tweak scripts (cloud-drive / antivirus / update-agent
+removal, leftover purge, safe-mode switching, the ETW dump helper, and the tray-icon cache reset).
+They are either unrelated to measuring writes or need a binary this repository does not build.
+The Chinese README keeps the diagnosis and the measured 41–43 % → 1–3 % result.
 
 ## FAQ
 

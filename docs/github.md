@@ -18,10 +18,16 @@
 
 | 日期 | 類型 | 內容 | Commit |
 |---|---|---|---|
-| 2026-11-16 | **首次發佈** | public repo 建立（MIT）：中英雙語說明（`README.md` / `README.zh-TW.md`）、英文版 README、`LICENSE`、`NOTICE.md`（微軟 DLL 授權）、去識別（`WIN10-MX5000\<user>` → `<user>`、`C:\Users\<user>` → `%USERPROFILE%`）、`.gitignore` 排除執行期資料（`data/ reports/ logs/`）與編譯產物、新增本檔。推送 50 個檔案。 | `3a9ef7b` |
+| 2026-11-16 | chore | 從公開版移除 11 支腳本（8 支作者本機環境清理：網盤/AVG/Autodesk/殘留；另 reset-traynotify、safemode、dump-events 與量測無關或依賴缺失），避免與量測主題混淆 | `(待填)` |
+| 2026-11-16 | **首次發佈** | public repo 建立（MIT）：中英雙語說明（`README.md` / `README.zh-TW.md`）、英文版 README、`LICENSE`、`NOTICE.md`（微軟 DLL 授權）、去識別（`<host>\<user>` → `<user>`、`C:\Users\<user>` → `%USERPROFILE%`）、`.gitignore` 排除執行期資料（`data/ reports/ logs/`）與編譯產物、新增本檔。推送 50 個檔案。 | `3a9ef7b` |
 | 2026-11-16 | fix | `remove-quark.ps1` / `remove-avg-browser.ps1` / `purge-leftovers.ps1` 移除寫死的 `C:\Users\<user>`，改用 `$env:LOCALAPPDATA` / `$env:APPDATA`（同機展開值不變，其他使用者才找得到自己的目錄；DryRun 已核對） | `fa95894` |
 
 > 「Commit」欄留 `—` 表示那是發佈動作本身或僅文件調整；有對應 commit 時填短 hash。
+
+> **本文件（以及 `docs/HISTORY.md`、`docs/TODO.md`、`docs/development.md`）提到的一些腳本
+> —— `avg-*`、`remove-*`、`purge-leftovers`、`disable-autodesk`、`safemode`、`reset-traynotify`、
+> `dump-events` 等 —— 是作者本機的工具，未包含在公開版。** 那些紀錄保留原樣（歷史事實），
+> 但相關檔案不在這個 repo 裡。
 
 ## Issue 處理紀錄
 
@@ -59,8 +65,35 @@
 
 ## 自動監看
 
-**規劃中**：`tools/github-watch.ps1`（每 30 分鐘）→ 有新 issue 時派 agent 讀取、依上表分流、
-修 bug、跑 `check-scripts.ps1`、commit + push、在 issue 回覆、並回填本檔。
+已實作：**`tools/github-watch.ps1`** ＋ Windows 排程工作 `SSDWriteMonitor-GitHubWatch`（每 30 分鐘）。
 
-在完成之前，手動流程：開 [Issues](https://github.com/ufft47/ssd-write-monitor/issues)
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\disk-monitor\tools\github-watch.ps1 -Once
+```
+
+行為：
+
+1. `gh issue list` 抓 open issues（最多 50 個）
+2. 與 `logs\github-state.json` 比對 → 只處理「新出現」或「updatedAt 變了」的
+3. 有就派一個 agent：`opencode run --auto --archived`
+   （任務內容寫在 `logs\github-issue-<N>-<時間>.md`，agent 輸出存 `logs\github-agent-<N>-<時間>.log`）
+4. agent 依上面的分流原則處理：bug 直接修 → 跑 `check-scripts.ps1` → commit + push →
+   在 issue 回覆 → 回填本檔「Issue 處理紀錄」
+5. **沒有新 issue 就什麼都不做**（一次檢查約 1–2 秒）
+
+保險：
+
+- **鎖檔** `logs\github-watch.lock`（60 分鐘過期）→ 不會兩個 agent 同時改同一個 repo
+- **每輪最多 3 個 issue**（`-MaxPerRun`），其餘留到下一輪
+- **agent 逾時 45 分鐘**強制結束（`-AgentTimeoutMinutes`）
+- `-DryRun` 只看會處理哪些；`-NoDispatch` 只更新狀態不派工；`-Loop` 前景常駐（測試用）
+- 日誌：`logs\github-watch-<日期>.log`
+
+移除排程：
+
+```powershell
+Unregister-ScheduledTask -TaskName 'SSDWriteMonitor-GitHubWatch' -Confirm:$false
+```
+
+手動流程（沒有排程或想自己處理時）：開 [Issues](https://github.com/ufft47/ssd-write-monitor/issues)
 → 依上表分流 → 處理後回填「Issue 處理紀錄」。

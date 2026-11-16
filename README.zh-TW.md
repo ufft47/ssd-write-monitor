@@ -63,9 +63,6 @@ powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\clean-attrib.ps1 -S
 powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\src\dashboard\cwatch-dashboard.ps1 `
   -Root D:\dev\disk-monitor -Once -OutFile D:\TEMP\dash.html
 
-# 檢查 AVG 搬移是否還健康（五項條件）
-powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\check-avg-migration.ps1
-
 # 重新部署 collector（提權）
 Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\deploy-collector.ps1'
 ```
@@ -111,20 +108,13 @@ D:\dev\disk-monitor\
 | 腳本 | 用途 |
 |---|---|
 | `clean-attrib.ps1` | 歸因清理與按實體碟對帳 |
-| `avg-clean-and-move.ps1` | AVG 垃圾清理／`ProgramData\AVG` 搬 D:（含 `-Verify`） |
-| `avg-move-programfiles.ps1` | `Program Files\AVG` 搬 D:（安全模式，含 `-Verify`/`-Revert`） |
-| `avg-try-stop.ps1` | 診斷「只關 AVG 服務能不能解鎖」（實測並自動復原） |
-| `remove-avg-browser.ps1` | 移除 AVG Secure Browser ＋清孤兒 junction |
-| `remove-quark.ps1` | 移除夸克网盘 ＋清懸空引用 |
 | `move-asus-ime-log.ps1` | ASUS 輸入法 ETW 追蹤：`-StopTrace` 或把 log 搬 D: |
 | `move-edge-ud.ps1` | Edge 的 `User Data` 搬 D:（junction；`-DryRun` / `-Apply` / `-Verify` / `-Revert`） |
 | `move-pagefile.ps1` | 主分頁檔搬 D:（**業主擱置**） |
-| `reset-traynotify.ps1` | 重置工作列圖示快取（`TrayNotify`）修 explorer 吃 CPU（`-DryRun` / `-Apply` / `-Verify` / `-Revert`） |
-| `safemode.ps1` | 指定／取消下一次開機進安全模式（WinRE 缺失時的替代） |
-| `check-avg-migration.ps1` | AVG 搬移後續健康檢查（可註冊每日排程） |
-| `purge-leftovers.ps1` | 提權逐項清理搬移殘留 |
-| `disable-autodesk.ps1` | 關閉 Autodesk Access 更新器 |
 | `deploy-collector.ps1` / `install-*.ps1` / `setup-task.ps1` | 部署與註冊排程 |
+
+> 其餘（網盤、AVG、Autodesk 更新器、搬移殘留清理、安全模式切換、ETW dump、工作列圖示快取重置等）
+> 是**作者本機的工具**，與「量測真實寫入／找出誰在寫」無關，**未包含在公開版**。
 
 ---
 
@@ -583,7 +573,10 @@ P90/分           115.8 MB
 
 ---
 
-## 把 AVG 的目錄搬到 D:（含為什麼選安全模式）
+## 把 AVG 的目錄搬到 D:（作者本機的實例）
+
+> 本節是作者機器的實測紀錄。**執行這些搬移的腳本屬於本機環境清理工具，未包含在公開版**；
+> 留下的是結論與方法，方便你照著自己寫一支。
 
 `C:\Program Files\AVG` 是 AVG **寫入最兇的目錄**（2026-11-15 實測：可信寫入 523 MB，
 其中定義更新 `defs\*.tmp` 300.6 MB、`AvVps\*.ipending` 222.0 MB），
@@ -617,7 +610,7 @@ P90/分           115.8 MB
 結論：**安全模式 = 一個 AVG 完全不存在的環境**，而那正是搬目錄需要的狀態。
 一次重開機即可，不必碰任何驅動登錄鍵。
 
-### 執行方式（`avg-move-programfiles.ps1`）
+### 執行方式
 
 > **2026-11-15 更正：本機的 WinRE 映像不存在，所以「Shift + 重新啟動 → 疑難排解 → 啟動設定」
 > 這條路走不通。** 實測 `C:\Windows\System32\Recovery\Winre.wim` 與
@@ -629,23 +622,24 @@ P90/分           115.8 MB
 >
 > - **msconfig（首選，最不容易出錯）**：Win+R → `msconfig` → 「開機」頁 → 勾「安全開機」→
 >   套用 → 確定 → 重新啟動。做完事後**回去取消勾選**再重新啟動。
-> - **`safemode.ps1 -Enter`**：用 `bcdedit` 指定下一次開機進安全模式；
->   做完用 `-Exit` 清除。注意本機 bcdedit 對 `{current}`／`{default}` 會回
->   「指定的命令列選項無效」，所以腳本改用 `/enum ACTIVE` 讀出的真實 GUID。
+> - **`bcdedit /set {current} safeboot minimal`**：做完再 `bcdedit /deletevalue {current} safeboot`
+>   清除。本機實測 `{current}`／`{default}` 會被 bcdedit 拒絕，要先用 `/enum ACTIVE` 讀出真實 GUID
+>   再帶入。安全模式切換**本專案未附腳本**。
 
 ```powershell
-# 0) 讓下一次開機直接進安全模式（不需 WinRE）
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\safemode.ps1','-Enter'
+# 0) 讓下一次開機直接進安全模式（不需 WinRE；本專案未附腳本）
+bcdedit /set {current} safeboot minimal
 #    或用 msconfig 勾「安全開機」，效果相同
 
 # 2) 安全模式中提權執行搬移
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-move-programfiles.ps1','-Move'
+#    robocopy /E /COPY:DAT /XJ → 逐檔比對 → 改名 <目錄>.bak-<時間> → mklink /J → 落地測試
+#    本機用的搬移腳本未包含在公開版，請照上面的前置檢查自己寫一支
 
-# 3) 正常重新開機後驗證
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-move-programfiles.ps1','-Verify'
+# 3) 正常重新開機後驗證（AVG 真的跑起來之後才算數）
+#    看 junction 還在不在、目標是否正確、D: 上的檔案時間是否有在動
 
-# 4) 出事時（安全模式）還原
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-move-programfiles.ps1','-Revert'
+# 4) 出事時（安全模式）
+#    把 <目錄>.bak-<時間> 改名回來；junction 用 cmd /c rmdir 移除（不加 /s）
 ```
 
 ### 安全網
@@ -660,7 +654,7 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy',
 1. **搬完不會立刻省空間。** 原件留在 `C:\Program Files\AVG.bak-<時間>`（2.5 GB），
    確認 AVG 穩定運作幾天才刪 —— 那時 C: 才會真正釋放。
 2. **AVG 更新器可能把目錄重建回 C:**。這正是「設定會被改回去」的同一個問題，
-   只是層級換成檔案系統。用 `-Verify` 隨時看 junction 還在不在。
+   只是層級換成檔案系統。隨時確認 junction 還在不在。
 3. **安全模式期間防毒不存在**。搬移那十幾分鐘機器沒有即時防護，請不要在這段時間上網或插隨身碟。
 
 ### 實測結果（2026-11-15，安全模式那趟）
@@ -677,14 +671,14 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy',
 兩個操作教訓：
 
 1. **安全模式裡的成功驗證不算數。** 當時服務是停的，驗證通過是真的；
-   AVG 一啟動就把 junction 換掉。`-MoveProgramData` 的驗證必須在**正常開機、AVG 跑起來之後**再做一次
-   —— 已加 `avg-clean-and-move.ps1 -Verify`（會判斷「被 AVG 接手」並列出備份與孤兒位置）。
+   AVG 一啟動就把 junction 換掉。搬完的驗證必須在**正常開機、AVG 跑起來之後**再做一次
+   （看 junction 是否還在、目標是否正確）。
 2. **`avgSP` 保護的是檔案本身，不是路徑字串。** 事後要刪 `.bak` 副本時：
    - `Remove-Item` → `拒絕存取路徑 'vault.db'`
    - 改名成不含「AVG」的名字 → `Access to the path ... is denied`
    - 也就是說**連 `.bak` 都只能在安全模式刪**。
 
-### 觀察期滿了沒：`check-avg-migration.ps1`
+### 觀察期：什麼情況才可以刪備份
 
 刪掉 `C:\Program Files\AVG.bak-…`（1,967.6 MB）之前要先確認 AVG 真的穩定。這件事不靠記憶，
 用可觀測的條件判斷，五項全過才算數：
@@ -697,21 +691,8 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy',
 | 定義寫在 D: | `D:\SSD\avg\ProgramFiles\Antivirus\defs` 有近期寫入 |
 | 安全性中心登記路徑 | `pathToSignedProductExe` 在 `D:\SSD\...` |
 
-三個結論與結束碼：`OK`＝0（可以刪）、`WAIT`＝1（觀察期未滿，預設 3 天）、`PROBLEM`＝2（不要刪，看哪項壞了）。
-
-```powershell
-# 隨時手動檢查（不需管理員）
-powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\check-avg-migration.ps1
-
-# 註冊每日 09:00 自動檢查（提權一次）
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\check-avg-migration.ps1','-RegisterTask'
-
-# 刪完備份後移除排程
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\check-avg-migration.ps1','-UnregisterTask'
-```
-
-結果會寫進 `data\state\avg-migration.json` 與 `logs\avg-migration-check.log`。
-**若結論是 PROBLEM 且是 junction 不見了**，代表 AVG 把目錄重建回 C: —— 那時要還原而不是刪備份。
+判準就是上面五項自己看一遍（作者本機用一支檢查腳本代勞，那支腳本未包含在公開版）。
+**若 junction 不見了**，代表 AVG 把目錄重建回 C: —— 那時要還原而不是刪備份。
 
 ### 儀表板的三個量測 bug（2026-11-15 修正）
 
@@ -777,7 +758,7 @@ ETW 只看得到「有檔名的寫入」；其餘是未緩衝 I/O（Robocopy `/J
 | 路徑 | 大小 | 說明 |
 |---|---|---|
 | `C:\Program Files\Common Files\AVG` | 77.3 MB | `Icarus\avg-av-vps\temp\` 的更新暫存（當日 14.6 MB + 11.3 MB + 3.9 MB）。量小，暫不處理 |
-| `C:\ProgramData\AVG` | 4.67 GB | 由 `avg-clean-and-move.ps1 -MoveProgramData` 處理（含常態快取，當日 198 MB） |
+| `C:\ProgramData\AVG` | 4.67 GB | **搬了也會被拆掉**：AVG 啟動時會把 junction 換成實體目錄（見上），所以本機已放棄處理它 |
 
 ---
 
@@ -838,29 +819,22 @@ CTrayNotify::_InsertNotify
 
 刪掉這兩個值並重啟 explorer 後，Windows 會自己重建新的快取 —— 不需要登錄修補、不需要重開機。
 
-**用法**（`reset-traynotify.ps1`，只碰這兩個值，其他登錄值一律不動）：
+**做法**（本工具 `reset-traynotify.ps1` 未包含在公開版）：
 
-```powershell
-# 看現況（值大小、explorer 10 秒 CPU、是否超過 200 KB 門檻）；不改任何東西
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\disk-monitor\reset-traynotify.ps1 -DryRun
+1. 先備份 `HKCU\...\CurrentVersion\TrayNotify` 的 `IconStreams` 與 `PastIconsStream`
+   （各存成一個 `.bin`，用 `[IO.File]::WriteAllBytes`）。
+2. 刪除這兩個值（`Remove-ItemProperty`）。
+3. 重啟 explorer（`Stop-Process -Name explorer -Force` —— Windows 會自己把它拉回來，
+   沒回來就手動啟動）。Windows 會自動重建新的快取。
+4. 確認 explorer CPU 與工作列圖示恢復正常。
 
-# 備份 → 刪值 → 重啟 explorer → 量 30 秒 CPU
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\disk-monitor\reset-traynotify.ps1 -Apply
-
-# 事後檢查（結論 OK / WARN / PROBLEM，exit 0 / 1 / 2）
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\disk-monitor\reset-traynotify.ps1 -Verify
-
-# 需要時從最新備份寫回（找不到備份會明確報錯）
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\disk-monitor\reset-traynotify.ps1 -Revert
-```
-
-- 判準：`PastIconsStream` **> 200 KB** 視為可疑；`-Verify` 另外要求 explorer CPU < 5%。
-- 備份存 `<Root>\logs\traynotify-backup-<時間>\<值名>.bin`（`[IO.File]::WriteAllBytes`），**不會自動刪除**；
-  備份失敗就中止，不會刪任何東西。
+- 判準：`PastIconsStream` **> 200 KB** 視為可疑；修完 CPU 應在 5% 以下。
 - **副作用**：重啟 explorer 會關閉已開的資料夾視窗，工作列圖示的可見性會重設
   （釘選的程式還在，只是「顯示隱藏的圖示」那類設定回到預設）。
-- 這支腳本只寫 `HKCU`，**不需要管理員**；建議就用一般權限跑 —— kill 掉的 explorer 由 Windows
+- 只寫 `HKCU`，**不需要管理員**；建議用一般權限跑 —— kill 掉的 explorer 由 Windows
   接管重啟，從提權內容手動 `Start-Process explorer.exe` 不一定會回到使用者的非提權桌面。
+- 要還原就從備份把兩個值寫回（`Set-ItemProperty -Type Binary`）再重啟 explorer；
+  通常不需要，刪掉後 Windows 會自己重建。
 
 ---
 
@@ -871,35 +845,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\disk-monitor\reset-tr
 
 | 腳本 | 做什麼 | 需要安全模式 | 可逆 |
 |---|---|---|---|
-| `disable-autodesk.ps1` | 停 `Autodesk Access Service Host`、啟動類型改 `Disabled` | 否 | 是（`-Revert`） |
-| `avg-clean-and-move.ps1 -CleanJunk` | 刪 AVG 垃圾 302 項 / 4,653 MB | 否 | **否**（刪除） |
-| `avg-clean-and-move.ps1 -MoveProgramData` | `C:\ProgramData\AVG` → D: + junction | 建議 | 是（`-Revert`） |
-| `avg-move-programfiles.ps1` | `C:\Program Files\AVG` → D: + junction | **是**（互鎖） | 是（`-Revert`） |
-| `avg-try-stop.ps1` | 診斷「只關服務能不能解鎖」 | 否 | 是（自動復原） |
-| `remove-avg-browser.ps1` | 移除 AVG Secure Browser + 清孤兒 junction | 否 | 否（需重裝） |
-| `remove-quark.ps1` | 移除夸克网盘 + 清懸空引用 | 否 | 否（需重裝） |
 | `move-asus-ime-log.ps1` | 停 ASUS IME 的 ETW 追蹤（`-StopTrace`）或把 log 搬 D: | 否 | 是（`-Revert`） |
 | `move-pagefile.ps1` | 主分頁檔搬到 D:（C: 省 22 GB） | 否 | 是（`-Revert`） |
-| `safemode.ps1` | 指定／取消「下一次開機進安全模式」（`bcdedit`） | — | 是（`-Exit`） |
-| `check-avg-migration.ps1` | 檢查 AVG 搬到 D: 後是否穩定、可否刪備份（可註冊每日排程） | 否 | 是（`-UnregisterTask`） |
-| `purge-leftovers.ps1` | 提權逐項清理搬移殘留（分辨「權限」與「avgSP 攔截」） | 否 | 否（刪除） |
+
+> 其餘（AVG、網盤、Autodesk 更新器、搬移殘留清理、安全模式切換等）是作者本機的腳本，
+> 公開版沒有包含 —— 它們與「量測寫入／找出誰在寫」無關。
+> **安全模式切換請用 `bcdedit` 或 `msconfig`（本專案未附腳本）。**
 
 ### 建議順序
 
 ```powershell
-# 0) 隨時可做
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\disable-autodesk.ps1'
+# 0) 進安全模式（重開機最麻煩，只做一次；本專案未附腳本）
+bcdedit /set {current} safeboot minimal
 
-# 1) 進安全模式，一次做完三件（重開機最麻煩，只做一次）
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-clean-and-move.ps1','-CleanJunk'
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-clean-and-move.ps1','-MoveProgramData'
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-move-programfiles.ps1','-Move'
-
-# 2) 正常開機後驗證
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\avg-move-programfiles.ps1','-Verify'
-
-# 3) 移除 AVG Secure Browser（獨立，任何時候）
-Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','D:\dev\disk-monitor\remove-avg-browser.ps1'
+# 1) 安全模式中提權搬移（robocopy → 逐檔比對 → 改名 → mklink /J → 落地測試）
+#    本機用的搬移腳本未包含在公開版，請照上面的前置檢查自己寫一支
+# 2) 正常開機後驗證：junction 還在、目標正確、D: 上的檔案時間有在動
+# 3) 出事時（安全模式）：把 <目錄>.bak-<時間> 改名回來，junction 用 cmd /c rmdir 移除
 ```
 
 先清垃圾再搬，是因為 `defs\26111106`（575 MB）會被刪掉，複製量從 2.54 GB 降到約 1.97 GB。
@@ -911,12 +873,12 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy',
 （實測上次 05:40:40、下次 05:50:50），持續碰觸 profile。當日仍有 12.7 MB 寫入 C:。
 
 它的 User Data 是 junction → `D:\SSD\avg-browser\User Data`（2,049 MB / 9,647 檔），
-卸載程式**不會**清它，所以 `remove-avg-browser.ps1` 會處理孤兒 junction。
+卸載程式**不會**清它 —— 要自己移除 junction。
 刪 junction 只能用 `cmd /c rmdir`，**不能加 `/s`**（會跟進刪掉 D: 上的目標）。
 
 profile 裡有 `Default\Bookmarks`（2024-05）與 `Default\Login Data`（2025-12，48 KB 已存密碼）。
-要連 profile 一起刪時必須加 `-RemoveProfile`，腳本會**先**把書籤與密碼等小檔案
-複製到 `D:\SSD\avg-browser\_backup-<時間>\`（約 0.5 MB）再刪。
+要連 profile 一起刪時，**先**把書籤與密碼等小檔案複製到 `D:\SSD\avg-browser\_backup-<時間>\`
+（約 0.5 MB）再刪。
 
 ---
 
@@ -1006,8 +968,8 @@ unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART --brand-clouddrive /LOG=<�
 | 排程工作 | `\QuarkUpdaterUser\QuarkUpdater\QuarkUpdaterTaskUser...` |
 | `HKCU\SOFTWARE\Classes` | `QuarkHTM`、`QuarkUpdaterUpdate.Update3WebUser` |
 
-→ `remove-quark.ps1` 已把「驗證目錄是否真的消失」當成前置條件：
-**卸載失敗時不會刪殘留資料**（否則會留下「裝著但沒有快取」的半殘狀態），要覆寫得加 `-Force`。
+→ 通則：**先驗證「目錄是否真的消失」，再刪殘留**。卸載失敗時不要刪資料
+（否則會留下「裝著但沒有快取」的半殘狀態）。
 
 ---
 

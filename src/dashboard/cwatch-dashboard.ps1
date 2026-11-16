@@ -7,9 +7,13 @@
       logs\hourly-summary.log    每小時摘要（畫走勢）
       data\state\collector.json  collector 心跳
 
+    兩個輸出口，資料都來自同一個 Get-DashboardState（不各算一份）：
+      GET /            伺服器渲染好的完整 HTML（首次載入就有資料，不必等 JS）
+      GET /api/state   同一份資料的 JSON；前端每 15 秒只抓這支、只換 DOM，不整頁重載
+
     用法：
-      -Once            只輸出 reports\dashboard.html 後結束（測試用）
-      -Port 8737       監聽埠
+      -Once            只輸出 reports\dashboard.html 後結束（測試／靜態存檔用）
+      -Port 8737       監聽埠（測試請用 8738，不要動托盤顧著的 8737）
 #>
 [CmdletBinding()]
 param(
@@ -177,8 +181,9 @@ function Get-Heartbeat {
     try { return Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
 }
 
-# ---------- 產生 HTML ----------
-function New-Dashboard {
+# ---------- 收集資料：HTML 與 JSON 的唯一來源 ----------
+# 回傳一個物件；JSON 直接序列化它，HTML 只是把它排版。兩邊不會各算一份。
+function Get-DashboardState {
     $now = Get-Date
     $today = $now.Date
     # 讀整天（檔案很小，約 8k 行/日）；先前只讀尾巴 400 行，會讓「今日」只算到最近一小時
@@ -197,6 +202,8 @@ function New-Dashboard {
     elseif ($hbAge -ge 90) { $collState = '停住了（' + $hbAge + ' 秒未更新）'; $collColor = '#d29922' }
     $bytesSeen = 0
     if ($null -ne $hb) { $bytesSeen = [double]$hb.bytes_seen }
+    $hbLine = 'collector 尚未啟動'
+    if ($null -ne $hb) { $hbLine = 'collector 心跳：' + $hb.updated + '（pid ' + $hb.pid + '）' }
 
     # 跨日或今日尚無資料時，回退到最近一份有內容的檔案
     $attribDir = Join-Path $Root 'data\attrib'
@@ -305,7 +312,7 @@ function New-Dashboard {
     $maxH = 0.0
     foreach ($h in $hourly) { if ($h.Bytes -gt $maxH) { $maxH = $h.Bytes } }
 
-    # sparkline
+    # sparkline（自家產生、不含任何使用者輸入，前端可以直接 innerHTML）
     $svg = ''
     if ($hourly.Count -gt 1 -and $maxH -gt 0) {
         $w = 720; $hgt = 90; $bw = [math]::Floor($w / $hourly.Count) - 2
@@ -324,39 +331,209 @@ function New-Dashboard {
         $svg = '<div class="muted">還沒有 2 個以上的小時資料</div>'
     }
 
-    function RowHtml($list, [bool]$showFiles) {
-        $sb = New-Object System.Text.StringBuilder
-        foreach ($a in $list) {
-            $files = ''
-            if ($showFiles) {
-                $top = @($a.Files.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3)
-                $parts = @()
-                foreach ($t in $top) { $parts += ([System.Web.HttpUtility]::HtmlEncode($t.Key) + ' <span class="muted">' + (Format-Bytes $t.Value) + '</span>') }
-                $files = ($parts -join '<br>')
-            }
-            $procTxt = [System.Web.HttpUtility]::HtmlEncode($a.Process)
-            if ($a.Process -eq 'cwatch') { $procTxt += ' <span class="muted">(本工具，含部署時的自測檔)</span>' }
-            $null = $sb.AppendLine(('<tr><td>{0}</td><td class="vol">{1}</td><td class="num">{2}</td><td class="num muted">{3:N0}</td><td class="files">{4}</td></tr>' -f `
-                $procTxt, $a.Volume, (Format-Bytes $a.Bytes), $a.Ops, $files))
-        }
-        if ($sb.Length -eq 0) { $null = $sb.AppendLine('<tr><td colspan="5" class="muted">目前沒有歸因資料（collector 是否在執行？）</td></tr>') }
-        return $sb.ToString()
-    }
-
-    Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
     $rateTxt = Format-Rate $c.Rate
     $rateColor = '#3fb950'
     if ($c.Rate -gt 5MB) { $rateColor = '#d29922' }
     if ($c.Rate -gt 20MB) { $rateColor = '#f85149' }
 
+    # 排行榜 → 給前端用的形狀（文字欄位先在後端算好，兩邊顯示才會一致）
+    function ConvertTo-ProcList($list, [int]$maxFiles) {
+        $out = @()
+        foreach ($a in $list) {
+            $files = @()
+            if ($maxFiles -gt 0) {
+                foreach ($t in @($a.Files.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First $maxFiles)) {
+                    $files += [pscustomobject]@{ path = [string]$t.Key; text = (Format-Bytes $t.Value) }
+                }
+            }
+            $out += [pscustomobject]@{
+                process   = [string]$a.Process
+                volume    = [string]$a.Volume
+                bytes     = [double]$a.Bytes
+                bytesText = (Format-Bytes $a.Bytes)
+                ops       = [double]$a.Ops
+                opsText   = ('{0:N0}' -f $a.Ops)
+                files     = $files
+            }
+        }
+        return $out
+    }
+
+    $hours = @()
+    foreach ($x in $hourly) {
+        $hours += [pscustomobject]@{ when = [string]$x.When; bytes = [double]$x.Bytes; text = (Format-Bytes $x.Bytes) }
+    }
+
+    return [pscustomobject]@{
+        generatedAt    = $now.ToString('o')
+        generatedLocal = $now.ToString('yyyy-MM-dd HH:mm:ss')
+        clock          = $now.ToString('HH:mm:ss')
+        rate           = [double]$c.Rate
+        rateText       = $rateTxt
+        rateColor      = $rateColor
+        todayTotal     = [pscustomobject]@{ bytes = [double]$c.Write; text = (Format-Bytes $c.Write) }
+        todayD         = [pscustomobject]@{ bytes = [double]$d.Write; text = (Format-Bytes $d.Write) }
+        hours          = $hours
+        processes      = (ConvertTo-ProcList $topAll 3)
+        processesC     = (ConvertTo-ProcList $topC 3)
+        collector      = [pscustomobject]@{
+            state         = $collState
+            color         = $collColor
+            pid           = $(if ($null -ne $hb) { $hb.pid } else { $null })
+            updated       = $(if ($null -ne $hb) { $hb.updated } else { $null })
+            bytesSeen     = $bytesSeen
+            bytesSeenText = (Format-Bytes $bytesSeen)
+            line          = $hbLine
+        }
+        attrLabel      = $attrLabel
+        attrMtime      = $attrMtime
+        physMtime      = $physMtime
+        coverageNote   = $coverageNote
+        deviceText     = (Format-Bytes $deviceBytes)
+        suspectText    = (Format-Bytes $suspectBytes)
+        svg            = $svg
+    }
+}
+
+# ---------- 產生 HTML（只負責排版 state，不再自己算數字） ----------
+# $Live = $true（伺服器模式）才產生輪詢腳本；-Once 的靜態快照連 fetch／setInterval 都不寫進去，
+# 用 file:// 打開就不會出現「更新失敗」，只顯示「靜態快照（時間）」。
+function New-DashboardHtml($s, [bool]$Live = $true) {
+    Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
+
+    function RowHtml($list, [bool]$showFiles) {
+        $sb = New-Object System.Text.StringBuilder
+        foreach ($a in $list) {
+            $files = ''
+            if ($showFiles) {
+                $parts = @()
+                foreach ($t in @($a.files)) { $parts += ([System.Web.HttpUtility]::HtmlEncode($t.path) + ' <span class="muted">' + $t.text + '</span>') }
+                $files = ($parts -join '<br>')
+            }
+            $procTxt = [System.Web.HttpUtility]::HtmlEncode($a.process)
+            if ($a.process -eq 'cwatch') { $procTxt += ' <span class="muted">(本工具，含部署時的自測檔)</span>' }
+            $null = $sb.AppendLine(('<tr><td>{0}</td><td class="vol">{1}</td><td class="num">{2}</td><td class="num muted">{3}</td><td class="files">{4}</td></tr>' -f `
+                $procTxt, $a.volume, $a.bytesText, $a.opsText, $files))
+        }
+        if ($sb.Length -eq 0) { $null = $sb.AppendLine('<tr><td colspan="5" class="muted">目前沒有歸因資料（collector 是否在執行？）</td></tr>') }
+        return $sb.ToString()
+    }
+
+    # 前端腳本由伺服器決定：-Once 的靜態快照不產生 fetch／setInterval（連字串都不留）
+    if ($Live) {
+        $updHint = '每 15 秒自動更新'
+        $updInit = '最後更新 ' + $s.clock
+        $js = @"
+var LIVE = true;
+(function () {
+  if (!LIVE) { return; }
+  var busy = false;
+  var lastOkText = "$($s.clock)";
+  function el(id) { return document.getElementById(id); }
+  function asArray(x) { if (!x) { return []; } if (Object.prototype.toString.call(x) === '[object Array]') { return x; } return [x]; }
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function hhmmss(d) { return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()); }
+  function setText(id, t) { var e = el(id); if (e) { e.textContent = (t === null || t === undefined) ? '' : String(t); } }
+  function buildRows(tbody, list, showFiles) {
+    if (!tbody) { return; }
+    while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }
+    var arr = asArray(list);
+    if (!arr.length) {
+      var tr0 = document.createElement('tr');
+      var td0 = document.createElement('td');
+      td0.colSpan = 5; td0.className = 'muted';
+      td0.textContent = '目前沒有歸因資料（collector 是否在執行？）';
+      tr0.appendChild(td0); tbody.appendChild(tr0); return;
+    }
+    for (var i = 0; i < arr.length; i++) {
+      var p = arr[i];
+      var tr = document.createElement('tr');
+      var tdP = document.createElement('td');
+      tdP.textContent = p.process;
+      if (p.process === 'cwatch') {
+        var tag = document.createElement('span'); tag.className = 'muted';
+        tag.textContent = ' (本工具，含部署時的自測檔)'; tdP.appendChild(tag);
+      }
+      tr.appendChild(tdP);
+      var tdV = document.createElement('td'); tdV.className = 'vol'; tdV.textContent = p.volume; tr.appendChild(tdV);
+      var tdB = document.createElement('td'); tdB.className = 'num'; tdB.textContent = p.bytesText; tr.appendChild(tdB);
+      var tdO = document.createElement('td'); tdO.className = 'num muted'; tdO.textContent = p.opsText; tr.appendChild(tdO);
+      var tdF = document.createElement('td'); tdF.className = 'files';
+      if (showFiles) {
+        var fl = asArray(p.files);
+        for (var j = 0; j < fl.length; j++) {
+          if (j > 0) { tdF.appendChild(document.createElement('br')); }
+          tdF.appendChild(document.createTextNode(fl[j].path));
+          var sp = document.createElement('span'); sp.className = 'muted';
+          sp.textContent = ' ' + fl[j].text; tdF.appendChild(sp);
+        }
+      }
+      tr.appendChild(tdF);
+      tbody.appendChild(tr);
+    }
+  }
+  function apply(s) {
+    setText('rate', s.rateText);
+    var re = el('rate');
+    if (re && s.rateColor) { re.style.color = s.rateColor; }
+    setText('todayC', s.todayTotal ? s.todayTotal.text : '');
+    setText('todayD', s.todayD ? s.todayD.text : '');
+    if (s.collector) {
+      setText('colltext', s.collector.state);
+      var dot = el('colldot');
+      if (dot && s.collector.color) { dot.style.background = s.collector.color; }
+      setText('bytesseen', s.collector.bytesSeenText);
+      setText('srcline', s.collector.line);
+    }
+    setText('attrts', s.attrMtime);
+    setText('physts', s.physMtime);
+    setText('attrlabel1', s.attrLabel);
+    setText('attrlabel2', s.attrLabel);
+    setText('cov', s.coverageNote);
+    setText('devbytes', s.deviceText);
+    setText('susbytes', s.suspectText);
+    var ch = el('chart');
+    if (ch && typeof s.svg === 'string' && s.svg.length) { ch.innerHTML = s.svg; }
+    buildRows(el('rowsC'), s.processesC, true);
+    buildRows(el('rowsAll'), s.processes, false);
+  }
+  function markOk() {
+    lastOkText = hhmmss(new Date());
+    var e = el('upd');
+    if (e) { e.style.color = ''; e.textContent = '最後更新 ' + lastOkText; }
+  }
+  function markFail() {
+    var e = el('upd');
+    if (e) { e.style.color = '#f85149'; e.textContent = '更新失敗（最後成功 ' + lastOkText + '）'; }
+  }
+  function refresh() {
+    if (document.hidden || busy) { return; }
+    busy = true;
+    fetch('/api/state', { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) { throw new Error('HTTP ' + r.status); } return r.json(); })
+      .then(function (s) { apply(s); markOk(); })
+      .catch(function () { markFail(); })
+      .then(function () { busy = false; });
+  }
+  setInterval(refresh, 15000);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) { refresh(); } });
+})();
+"@
+    } else {
+        $updHint = '靜態快照（不會自動更新）'
+        $updInit = '靜態快照（' + $s.generatedLocal + '）'
+        $js = @"
+var LIVE = false;
+(function () {
+  var e = document.getElementById('upd');
+  if (e) { e.textContent = '靜態快照（$($s.generatedLocal)）'; }
+})();
+"@
+    }
     $html = @"
 <!DOCTYPE html>
 <html lang="zh-Hant"><head><meta charset="utf-8">
 <title>CWatch — C 碟寫入監控</title>
-<script>
-// 用帶時間戳的重新載入，避免瀏覽器從快取拿到舊頁面
-setTimeout(function () { location.replace('/?t=' + Date.now()); }, 15000);
-</script>
 <style>
 :root{color-scheme:dark}
 body{font-family:"Segoe UI","Microsoft JhengHei",sans-serif;background:#0d1117;color:#c9d1d9;margin:0;padding:24px}
@@ -376,43 +553,53 @@ th{color:#8b949e;font-weight:500;font-size:12px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
 </style></head><body>
 <h1>CWatch — C 碟寫入監控</h1>
-<div class="muted">頁面產生：$($now.ToString('yyyy-MM-dd HH:mm:ss')) · 每 15 秒自動更新</div>
-<div class="muted" style="margin-top:4px">原始資料：歸因 $attrMtime · 落盤 $physMtime</div>
+<div class="muted">頁面產生：$($s.generatedLocal) · $updHint · <span id="upd">$updInit</span></div>
+<div class="muted" style="margin-top:4px">原始資料：歸因 <span id="attrts">$($s.attrMtime)</span> · 落盤 <span id="physts">$($s.physMtime)</span></div>
 
 <div class="cards">
-  <div class="card"><div class="k">C: 目前寫入</div><div class="v" style="color:$rateColor">$rateTxt</div></div>
-  <div class="card"><div class="k">C: 今日落盤</div><div class="v">$(Format-Bytes $c.Write)</div></div>
-  <div class="card"><div class="k">D: 今日落盤</div><div class="v">$(Format-Bytes $d.Write)</div></div>
-  <div class="card"><div class="k">Collector</div><div class="v" style="font-size:15px"><span class="dot" style="background:$collColor"></span>$collState</div></div>
-  <div class="card"><div class="k">ETW 累計位元組</div><div class="v" style="font-size:15px">$(Format-Bytes $bytesSeen)</div></div>
+  <div class="card"><div class="k">C: 目前寫入</div><div class="v" id="rate" style="color:$($s.rateColor)">$($s.rateText)</div></div>
+  <div class="card"><div class="k">C: 今日落盤</div><div class="v" id="todayC">$($s.todayTotal.text)</div></div>
+  <div class="card"><div class="k">D: 今日落盤</div><div class="v" id="todayD">$($s.todayD.text)</div></div>
+  <div class="card"><div class="k">Collector</div><div class="v" style="font-size:15px"><span class="dot" id="colldot" style="background:$($s.collector.color)"></span><span id="colltext">$($s.collector.state)</span></div></div>
+  <div class="card"><div class="k">ETW 累計位元組</div><div class="v" style="font-size:15px" id="bytesseen">$($s.collector.bytesSeenText)</div></div>
 </div>
 
 <h2>最近 24 小時 C: 落盤</h2>
-$svg
+<div id="chart">$($s.svg)</div>
 
-<h2>C: 寫入排行（$attrLabel，ETW 歸因）</h2>
-<div class="muted" style="margin-bottom:8px">$coverageNote</div>
-<table><tr><th>進程</th><th>磁碟區</th><th class="num">寫入</th><th class="num">次數</th><th>主要檔案</th></tr>
-$(RowHtml $topC $true)
-</table>
+<h2>C: 寫入排行（<span id="attrlabel1">$($s.attrLabel)</span>，ETW 歸因）</h2>
+<div class="muted" style="margin-bottom:8px" id="cov">$($s.coverageNote)</div>
+<table><thead><tr><th>進程</th><th>磁碟區</th><th class="num">寫入</th><th class="num">次數</th><th>主要檔案</th></tr></thead>
+<tbody id="rowsC">
+$(RowHtml $s.processesC $true)
+</tbody></table>
 
-<h2>全機寫入排行（$attrLabel，所有磁碟區）</h2>
-<table><tr><th>進程</th><th>磁碟區</th><th class="num">寫入</th><th class="num">次數</th><th>主要檔案</th></tr>
-$(RowHtml $topAll $false)
-</table>
+<h2>全機寫入排行（<span id="attrlabel2">$($s.attrLabel)</span>，所有磁碟區）</h2>
+<table><thead><tr><th>進程</th><th>磁碟區</th><th class="num">寫入</th><th class="num">次數</th><th>主要檔案</th></tr></thead>
+<tbody id="rowsAll">
+$(RowHtml $s.processes $false)
+</tbody></table>
 
 <p class="muted" style="margin-top:24px;font-size:12px">
 資料來源：PhysicalDisk（落盤總量）＋ ETW Kernel-File（進程 × 檔案）。<br>
 ETW 只記錄寫入事件；「次數」是寫入 IRP 數，不代表檔案數。<br>
-無法歸屬到檔案（裝置／pipe／未緩衝 I/O）：$(Format-Bytes $deviceBytes)<br>
-已排除的可疑列（路徑不存在、是目錄、或路徑不明＝磁碟區也可能是猜的）：$(Format-Bytes $suspectBytes)<br>
+無法歸屬到檔案（裝置／pipe／未緩衝 I/O）：<span id="devbytes">$($s.deviceText)</span><br>
+已排除的可疑列（路徑不存在、是目錄、或路徑不明＝磁碟區也可能是猜的）：<span id="susbytes">$($s.suspectText)</span><br>
 記憶體映射（mmap）的寫入在系統上記為 <code>System</code>，不會記到原程式。<br>
 若某段資料的時間早於目前 collector 的啟動時間，那段可能由舊版程式產生，僅供參考。<br>
-$(if ($null -ne $hb) { 'collector 心跳：' + $hb.updated + '（pid ' + $hb.pid + '）' } else { 'collector 尚未啟動' })
+<span id="srcline">$($s.collector.line)</span>
 </p>
+<script>
+$js
+</script>
 </body></html>
 "@
     return $html
+}
+
+# 相容舊呼叫端（-Once 與外部工具都叫這支）
+function New-Dashboard {
+    return New-DashboardHtml (Get-DashboardState) $false
 }
 
 # ---------- 主流程 ----------
@@ -442,9 +629,27 @@ while ($true) {
             $h = $reader.ReadLine()
             if ([string]::IsNullOrEmpty($h)) { break }
         }
-        $body = New-Dashboard
+
+        # 只認路徑；查詢字串忽略
+        $reqPath = '/'
+        if ($requestLine) {
+            $bits = $requestLine.Split(' ')
+            if ($bits.Length -ge 2) { $reqPath = $bits[1] }
+        }
+        $q = $reqPath.IndexOf('?')
+        if ($q -ge 0) { $reqPath = $reqPath.Substring(0, $q) }
+
+        $state = Get-DashboardState
+        if ($reqPath -eq '/api/state') {
+            $body = ($state | ConvertTo-Json -Depth 8 -Compress)
+            $ctype = 'application/json; charset=utf-8'
+        } else {
+            $body = New-DashboardHtml $state
+            $ctype = 'text/html; charset=utf-8'
+        }
+
         $bytes = [Text.Encoding]::UTF8.GetBytes($body)
-        $header = "HTTP/1.1 200 OK`r`nContent-Type: text/html; charset=utf-8`r`nContent-Length: $($bytes.Length)`r`nCache-Control: no-store, no-cache, must-revalidate, max-age=0`r`nPragma: no-cache`r`nExpires: 0`r`nConnection: close`r`n`r`n"
+        $header = "HTTP/1.1 200 OK`r`nContent-Type: $ctype`r`nContent-Length: $($bytes.Length)`r`nCache-Control: no-store, no-cache, must-revalidate, max-age=0`r`nPragma: no-cache`r`nExpires: 0`r`nConnection: close`r`n`r`n"
         $hb2 = [Text.Encoding]::ASCII.GetBytes($header)
         $stream.Write($hb2, 0, $hb2.Length)
         $stream.Write($bytes, 0, $bytes.Length)

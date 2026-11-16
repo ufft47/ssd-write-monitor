@@ -21,3 +21,6 @@ src/cwatch/*.dll
 src/run-hidden.vbs
 src/cwatch/collector-hidden.vbs
 src/tray/tray-hidden.vbs
+
+# 排程用的隱藏啟動器（含本機絕對路徑）
+tools/github-watch-hidden.vbs

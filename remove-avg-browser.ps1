@@ -53,7 +53,7 @@ $ErrorActionPreference = 'Continue'
 
 $browserDir = 'C:\Program Files (x86)\AVG\Browser'
 $appDir     = Join-Path $browserDir 'Application'
-$userData   = 'C:\Users\ufft4\AppData\Local\AVG\Browser\User Data'
+$userData   = Join-Path $env:LOCALAPPDATA 'AVG\Browser\User Data'
 $profileD   = 'D:\MX500\avg-browser\User Data'
 $backupRoot = 'D:\MX500\avg-browser'
 $logDir     = 'D:\dev\disk-monitor\logs'

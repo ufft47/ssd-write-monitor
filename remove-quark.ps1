@@ -59,10 +59,10 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
-$progDir   = 'C:\Users\ufft4\AppData\Local\Programs\Quark'
-$localData = 'C:\Users\ufft4\AppData\Local\Quark'
-$updater   = 'C:\Users\ufft4\AppData\Local\QuarkUpdater'
-$roaming   = 'C:\Users\ufft4\AppData\Roaming\Quark'
+$progDir   = Join-Path $env:LOCALAPPDATA 'Programs\Quark'
+$localData = Join-Path $env:LOCALAPPDATA 'Quark'
+$updater   = Join-Path $env:LOCALAPPDATA 'QuarkUpdater'
+$roaming   = Join-Path $env:APPDATA 'Quark'
 $logDir    = 'D:\dev\disk-monitor\logs'
 $backupDir = Join-Path $logDir "quark-backup-$stamp"
 $logFile   = Join-Path $logDir "remove-quark-$stamp.log"

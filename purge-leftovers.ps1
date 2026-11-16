@@ -48,7 +48,7 @@ $targets = @(
     @{ Path = 'C:\ProgramData\ASUS\AsusIME\log.bak-20261115-061446'; Why = 'ASUS 日誌搬家時的舊副本（現行 log 已是 junction → D:）' },
     @{ Path = 'C:\ProgramData\AVG.bak-20261115-075503';               Why = '舊 AVG ProgramData（AVG 已重建新目錄）' },
     @{ Path = 'D:\MX500\avg\ProgramData';                             Why = 'AVG 重建後留下的孤兒（無任何程式引用）' },
-    @{ Path = 'C:\Users\ufft4\AppData\Local\AVG\Browser';             Why = 'AVG Browser 已被 AVG 移除，留下的 User Data' }
+    @{ Path = (Join-Path $env:LOCALAPPDATA 'AVG\Browser');             Why = 'AVG Browser 已被 AVG 移除，留下的 User Data' }
 )
 
 $logDir  = 'D:\dev\disk-monitor\logs'

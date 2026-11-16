@@ -18,6 +18,7 @@
 
 | 日期 | 類型 | 內容 | Commit |
 |---|---|---|---|
+| 2026-11-17 | feat | **儀表板改為局部更新**：新增 `GET /api/state`（JSON、`no-store`），前端每 15 秒 `fetch` 只更新速率／今日累計／SVG／進程表，不再 `location.replace` 整頁重載；進程表改用 `textContent` 組節點（防 XSS）、失敗保留舊資料、分頁隱藏時暫停；`-Once` 靜態快照不再輪詢（顯示「靜態快照」） | `8048507` |
 | 2026-11-16 | chore | 從公開版移除 11 支腳本（8 支作者本機環境清理：網盤/AVG/Autodesk/殘留；另 reset-traynotify、safemode、dump-events 與量測無關或依賴缺失），避免與量測主題混淆；同時新增 `tools/github-watch.ps1`（自動監看 issue） | `61fd5a8` |
 | 2026-11-16 | **首次發佈** | public repo 建立（MIT）：中英雙語說明（`README.md` / `README.zh-TW.md`）、英文版 README、`LICENSE`、`NOTICE.md`（微軟 DLL 授權）、去識別（`<host>\<user>` → `<user>`、`C:\Users\<user>` → `%USERPROFILE%`）、`.gitignore` 排除執行期資料（`data/ reports/ logs/`）與編譯產物、新增本檔。推送 50 個檔案。 | `3a9ef7b` |
 | 2026-11-16 | fix | `remove-quark.ps1` / `remove-avg-browser.ps1` / `purge-leftovers.ps1` 移除寫死的 `C:\Users\<user>`，改用 `$env:LOCALAPPDATA` / `$env:APPDATA`（同機展開值不變，其他使用者才找得到自己的目錄；DryRun 已核對） | `fa95894` |

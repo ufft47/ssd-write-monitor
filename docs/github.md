@@ -18,6 +18,7 @@
 
 | 日期 | 類型 | 內容 | Commit |
 |---|---|---|---|
+| 2026-11-17 | feat | **小時明細可切換**：圖表加「即時」按鈕（`liveBtn`）；點長條進入該小時檢視、再點同一根或按「即時」即取消並回到即時顯示；`/api/state` 每 15 秒重畫圖表後會重新套用選取色，明細不會被關掉 | `63185c5` |
 | 2026-11-17 | feat | **點選小時 → 該小時各程式落盤**：新增 `GET /api/hour?hour=HH&date=YYYY-MM-DD`（依 process+volume 彙總 bytes/ops、附前 3 個檔案、以檔案 mtime 快取）；24 小時長條圖可點擊（事件委派），點後在圖表下方顯示該小時明細並標示選取；明細標明「ETW 歸因（邏輯寫入，非實體落盤）」 | `e9320b2` |
 | 2026-11-17 | feat | **儀表板改為局部更新**：新增 `GET /api/state`（JSON、`no-store`），前端每 15 秒 `fetch` 只更新速率／今日累計／SVG／進程表，不再 `location.replace` 整頁重載；進程表改用 `textContent` 組節點（防 XSS）、失敗保留舊資料、分頁隱藏時暫停；`-Once` 靜態快照不再輪詢（顯示「靜態快照」） | `8048507` |
 | 2026-11-16 | chore | 從公開版移除 11 支腳本（8 支作者本機環境清理：網盤/AVG/Autodesk/殘留；另 reset-traynotify、safemode、dump-events 與量測無關或依賴缺失），避免與量測主題混淆；同時新增 `tools/github-watch.ps1`（自動監看 issue） | `61fd5a8` |

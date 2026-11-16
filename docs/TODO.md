@@ -50,4 +50,4 @@
 - **AVG 托盤圖示／UI 卡住** —— CPU 迴圈已修好：不是 AVG 的問題，是工作列圖示快取 `TrayNotify`
   膨脹（`PastIconsStream` 929,606 bytes），explorer 對每個圖示反覆重算簽章。
   用 `reset-traynotify.ps1` 重置後 **41–43% → 1–3%**（快取重建為 47,392 bytes），已 `-Verify` = OK。
-  **待確認**：AVG 的托盤圖示是否已正常出現在右下角（若不見，可能還要重開一次 AVG 主控台）。
+  **托盤圖示已確認恢復**（業主目視：右下角看得到 AVG 圖示）。

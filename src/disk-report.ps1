@@ -712,6 +712,9 @@ foreach ($hStart in $pending) {
         $cT = Get-IOStats $physByDev[$cDev] $todayStart $hEnd
         $todayGb = $cT.WriteBytes / 1GB
     }
+    # 注意：這行的時間戳是「區間結束」($hEnd)，例如 16:00 代表 15:00–16:00。
+    # 儀表板的明細是以「起始時刻」過濾 minute 欄位，所以 cwatch-dashboard.ps1 的
+    # Get-Hourly 會把這裡的 When 減一小時再給前端，兩邊才對得上。
     $summaryLines.Add(('{0} | C: disk {1} | med {2} | p90 {3} | max {4} | fs {5} | today {6:N2} GB | free {7} | cover {8}% | life {9}% | cdi {10} GB' -f `
         $hEnd.ToString('yyyy-MM-dd HH:mm'),
         (Format-Bytes $(if ($null -ne $cP) { $cP.WriteBytes } else { 0 })),

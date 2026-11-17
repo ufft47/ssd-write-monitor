@@ -170,7 +170,19 @@ function Get-Hourly([int]$count = 24) {
             'MB' { $v = $v * 1MB }
             'GB' { $v = $v * 1GB }
         }
-        $out += [pscustomobject]@{ When = $m.Groups[1].Value; Bytes = $v }
+        $out += [pscustomobject]@{
+            When = $m.Groups[1].Value
+            # 摘要行的時間戳是「區間結束時刻」（disk-report.ps1 用 $hEnd）。
+            # 明細是依 minute 的 HH 過濾，也就是「區間起始」。這裡先算好起始時刻，
+            # 讓長條圖 data-hour 與明細用同一個定義（否則點 16:00 會看到 16:00–16:59）。
+            Start = ([datetime]::ParseExact($m.Groups[1].Value, 'yyyy-MM-dd HH:mm', $null)).AddHours(-1)
+            Bytes = $v
+        }
+    }
+    foreach ($o in $out) {
+        $o | Add-Member -NotePropertyName StartHour -NotePropertyValue $o.Start.Hour -Force
+        $o | Add-Member -NotePropertyName StartDate -NotePropertyValue $o.Start.ToString('yyyy-MM-dd') -Force
+        $o | Add-Member -NotePropertyName Label -NotePropertyValue ('{0:HH:mm}–{1:HH:mm}' -f $o.Start, $o.Start.AddHours(1)) -Force
     }
     return $out
 }
@@ -185,19 +197,40 @@ function Get-Heartbeat {
 # 這張表是 ETW 的「邏輯寫入」，與長條圖的 PhysicalDisk「實體落盤」是不同量測，不能相加。
 # 快取：$script:hourCache[date|hour] = @{ Mtime; Value }；attrib 檔 LastWriteTimeUtc 沒變就重用。
 $script:hourCache = @{}
-function Get-HourDetail([string]$date, [int]$hour) {
+function Get-HourDetail([string]$date, [int]$hour, [string]$Volume = 'C:') {
     $label = ('{0:00}:00–{0:00}:59' -f $hour)
     $file = Join-Path $Root ('data\attrib\' + $date + '.csv')
+
+    # 同時段的 PhysicalDisk 寫入（長條圖用的量）。兩者是不同量測，只做對照，不可相加。
+    $physBytes = [double]0
+    $physText = '-'
+    $sumFile = Join-Path $Root 'logs\hourly-summary.log'
+    if (Test-Path -LiteralPath $sumFile) {
+        $endStamp = ([datetime]::ParseExact($date, 'yyyy-MM-dd', $null)).AddHours($hour + 1).ToString('yyyy-MM-dd HH:mm')
+        foreach ($ln in [IO.File]::ReadAllLines($sumFile, [Text.Encoding]::UTF8)) {
+            if (-not $ln.StartsWith($endStamp + ' | ')) { continue }
+            $mm = [regex]::Match($ln, 'C: disk ([\d\.]+) (KB|MB|GB)')
+            if ($mm.Success) {
+                $pv = [double]$mm.Groups[1].Value
+                switch ($mm.Groups[2].Value) { 'KB' { $pv = $pv * 1KB } 'MB' { $pv = $pv * 1MB } 'GB' { $pv = $pv * 1GB } }
+                $physBytes = $pv
+                $physText = Format-Bytes $pv
+            }
+            break
+        }
+    }
+
     $empty = [pscustomobject]@{
-        date = $date; hour = $hour; label = $label
+        date = $date; hour = $hour; label = $label; volume = $Volume
         totalBytes = [double]0; totalBytesText = (Format-Bytes 0)
         totalOps = [double]0; totalOpsText = '0'
+        physicalBytes = $physBytes; physicalBytesText = $physText
         groups = 0; rows = @()
     }
     if (-not (Test-Path -LiteralPath $file)) { return $empty }
 
     $mtime = (Get-Item -LiteralPath $file).LastWriteTimeUtc
-    $key = $date + '|' + $hour
+    $key = $date + '|' + $hour + '|' + $Volume
     if ($script:hourCache.ContainsKey($key)) {
         $hit = $script:hourCache[$key]
         if ($hit.Mtime -eq $mtime) { return $hit.Value }
@@ -223,6 +256,7 @@ function Get-HourDetail([string]$date, [int]$hour) {
         if (-not [double]::TryParse($p[$opsIdx], [ref]$o)) { continue }
         $proc = $p[2]
         $vol = $p[3]
+        if ($Volume -ne 'all' -and $vol -ne $Volume) { continue }
         $path = ($p[4..($bytesIdx - 1)] -join ',')
         $path = $path.Trim('"')
         $k = $proc + '|' + $vol
@@ -257,9 +291,10 @@ function Get-HourDetail([string]$date, [int]$hour) {
     }
 
     $value = [pscustomobject]@{
-        date = $date; hour = $hour; label = $label
+        date = $date; hour = $hour; label = $label; volume = $Volume
         totalBytes = $totalBytes; totalBytesText = (Format-Bytes $totalBytes)
         totalOps = $totalOps; totalOpsText = ('{0:N0}' -f $totalOps)
+        physicalBytes = $physBytes; physicalBytesText = $physText
         groups = $agg.Count; rows = $rows
     }
     $script:hourCache[$key] = [pscustomobject]@{ Mtime = $mtime; Value = $value }
@@ -409,9 +444,10 @@ function Get-DashboardState([bool]$Live = $true) {
             if ($bh -lt 1) { $bh = 1 }
             $xpos = 4 + $i * ($bw + 2)
             $dyn = ''
-            if ($Live -and $x.When.Length -ge 13) { $dyn = (' data-hour="{0}" style="cursor:pointer"' -f $x.When.Substring(11, 2)) }
-            $bars += ('<rect x="{0}" y="{1}" width="{2}" height="{3}" fill="#1f6feb" rx="1"{6}><title>{4}  {5}</title></rect>' -f `
-                $xpos, ($hgt - $bh), $bw, $bh, $x.When, (Format-Bytes $x.Bytes), $dyn)
+            # data-hour 用「起始小時」，與明細的過濾條件一致
+            if ($Live) { $dyn = (' data-hour="{0}" data-date="{1}" style="cursor:pointer"' -f $x.StartHour, $x.StartDate) }
+            $bars += ('<rect x="{0}" y="{1}" width="{2}" height="{3}" fill="#1f6feb" rx="1"{6}><title>{4}（{5}）</title></rect>' -f `
+                $xpos, ($hgt - $bh), $bw, $bh, $x.Label, (Format-Bytes $x.Bytes), $dyn)
             $i++
         }
         $svg = ('<svg width="{0}" height="{1}" viewBox="0 0 {0} {1}">{2}</svg>' -f $w, $hgt, $bars)
@@ -449,7 +485,14 @@ function Get-DashboardState([bool]$Live = $true) {
 
     $hours = @()
     foreach ($x in $hourly) {
-        $hours += [pscustomobject]@{ when = [string]$x.When; bytes = [double]$x.Bytes; text = (Format-Bytes $x.Bytes) }
+        $hours += [pscustomobject]@{
+            when      = [string]$x.When
+            startHour = [int]$x.StartHour
+            startDate = [string]$x.StartDate
+            label     = [string]$x.Label
+            bytes     = [double]$x.Bytes
+            text      = (Format-Bytes $x.Bytes)
+        }
     }
 
     return [pscustomobject]@{
@@ -615,6 +658,8 @@ var LIVE = true;
       .then(function () { busy = false; });
   }
   var selHour = null;
+  var selVol = 'C:';
+  var selDate = '';
   var chartBox = document.getElementById('chart');
   var hourBox = document.getElementById('hourDetail');
   var liveBtn = document.getElementById('liveBtn');
@@ -643,12 +688,16 @@ var LIVE = true;
       hourBox.style.display = 'none';
     }
   }
-  function enterHour(h) {
+  function enterHour(h, date, vol) {
     selHour = h;
+    if (vol) { selVol = vol; }
     highlight();
     syncLiveBtn();
     if (hourBox) { hourBox.style.display = ''; }
-    fetch('/api/hour?hour=' + encodeURIComponent(h), { cache: 'no-store' })
+    var url = '/api/hour?hour=' + encodeURIComponent(h) + '&volume=' + encodeURIComponent(selVol);
+    if (date) { url += '&date=' + encodeURIComponent(date); }
+    selDate = date || '';
+    fetch(url, { cache: 'no-store' })
       .then(function (r) { if (!r.ok) { throw new Error('HTTP ' + r.status); } return r.json(); })
       .then(function (d) { showHourDetail(d); })
       .catch(function () { showHourError(h); });
@@ -660,8 +709,28 @@ var LIVE = true;
     var head = document.createElement('div');
     head.className = 'muted';
     head.style.margin = '10px 0 6px';
-    head.textContent = d.label + '　合計 ' + d.totalBytesText + '（ETW 歸因：邏輯寫入，非實體落盤；' + d.groups + ' 筆）';
+    var volTxt = (d.volume === 'all') ? '全部磁碟區' : (d.volume || 'C:');
+    head.textContent = '區間 ' + d.label + '（' + volTxt + '）'
+      + '　ETW 邏輯寫入 ' + d.totalBytesText
+      + '　｜　同時段 PhysicalDisk ' + (d.physicalBytesText || '-')
+      + '　（兩者量測不同，不可相加）';
     box.appendChild(head);
+    var bar = document.createElement('div');
+    bar.className = 'muted';
+    bar.style.margin = '0 0 8px';
+    var vols = [['C:', '只看 C:'], ['all', '全部磁碟區']];
+    for (var vi = 0; vi < vols.length; vi++) {
+      var vb = document.createElement('button');
+      vb.type = 'button';
+      vb.textContent = vols[vi][1];
+      vb.style.cssText = 'margin-right:8px;padding:2px 10px;font-size:12px;font-family:inherit;border-radius:6px;cursor:pointer;'
+        + 'background:' + ((d.volume || 'C:') === vols[vi][0] ? '#1f6feb' : '#21262d') + ';'
+        + 'border:1px solid ' + ((d.volume || 'C:') === vols[vi][0] ? '#1f6feb' : '#30363d') + ';'
+        + 'color:' + ((d.volume || 'C:') === vols[vi][0] ? '#fff' : '#8b949e') + ';';
+      (function (v) { vb.addEventListener('click', function () { enterHour(d.hour, selDate, v); }); })(vols[vi][0]);
+      bar.appendChild(vb);
+    }
+    box.appendChild(bar);
     var rows = asArray(d.rows);
     if (!rows.length) {
       var none = document.createElement('div');
@@ -721,8 +790,9 @@ var LIVE = true;
       var t = ev.target;
       if (!t || t.tagName.toLowerCase() !== 'rect') { return; }
       var h = t.getAttribute('data-hour');
+      var dt = t.getAttribute('data-date') || '';
       if (h === null) { return; }
-      if (h === selHour) { backToLive(); } else { enterHour(h); }
+      if (h === selHour) { backToLive(); } else { enterHour(h, dt); }
     });
   }
   if (liveBtn) {
@@ -889,7 +959,10 @@ while ($true) {
                     $status = 400
                     $body = '{"error":"date must be YYYY-MM-DD"}'
                 } else {
-                    $body = (Get-HourDetail $dateTxt $hourNum | ConvertTo-Json -Depth 8 -Compress)
+                    $volTxt = 'C:'
+                    if ($query.ContainsKey('volume') -and $query['volume']) { $volTxt = [string]$query['volume'] }
+                    if ($volTxt -ne 'all' -and $volTxt -notmatch '^[A-Za-z]:$') { $volTxt = 'C:' }
+                    $body = (Get-HourDetail $dateTxt $hourNum $volTxt | ConvertTo-Json -Depth 8 -Compress)
                 }
             }
         } else {

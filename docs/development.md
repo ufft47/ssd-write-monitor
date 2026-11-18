@@ -116,7 +116,6 @@ ETW 只看得到「有檔名的寫入」。其餘是：
 ---
 
 ## 3. AVG / ASUS 的實測事實（避免重查）
-
 ### 3.1 AVG 的自我保護
 
 | 事實 | 證據 |
@@ -152,6 +151,25 @@ ETW 只看得到「有檔名的寫入」。其餘是：
 
 ---
 
+### 3.4 「無名讀寫」＝ Windows 磁碟重組（defrag）
+
+2026-11-18 實測：I: / F:（同一顆 8 TB HDD）單日寫 61.40 GB、讀 61.20 GB，但：
+
+| 觀察 | 結果 |
+|---|---|
+| 歸因表 | **一筆都沒有**（volume `I:`／`F:` 沒有任何列） |
+| `bytes_unresolved` | `System` **69.86 GB**（未緩衝 I/O，無檔名） |
+| 16:00 後被修改的檔案 | **0**（深度 3 內） |
+| 每分鐘曲線 | 16:44 起 1.5–2.1 GB/min，讀寫幾乎對稱 |
+| 排程 | `\Microsoft\Windows\Defrag\ScheduledDefrag` → `defrag.exe -c -h -o -$` |
+| 事件 258 | 16:43:27「已在 BACKUP4T (E:) 完成磁碟重組」、16:43:42「已在 7T-SYS (I:) 完成」 |
+
+**判讀規則**：某顆碟有大量讀寫、卻**沒有任何檔案時間戳改變** → 先想 defrag／重組，
+不要一開始就找可疑程式。重組會搬移資料但不動 mtime，而且一律以 `System`（未緩衝 I/O）
+出現在 ETW，所以歸因表永遠是空的。
+
+> 排程結果 `0x8007042B`（1067）＝ 被中止，所以它跑到一半就停了，不是整晚持續。
+
 ## 4. 工具與環境
 
 ### 4.1 這台機器的特殊之處
@@ -178,6 +196,17 @@ ETW 只看得到「有檔名的寫入」。其餘是：
 6. **能用改名就不要用搬移**（改名是瞬間且可逆）。
 7. **每個提權腳本都要有 `-DryRun` 與 `-Revert`**，並在 DryRun 裡印出「會做什麼」。
 8. **刪除前先掃 `ReparsePoint`**，避免 `Remove-Item -Recurse` 跟進別人的目標。
+9. **`-f` 不要直接寫在方法呼叫的括號裡。**
+   ```powershell
+   # 錯：$(sb.Append('...{0}...' -f $a, $b))  → 逗號被當成 Append 的參數分隔，索引超出範圍
+   # 對：
+   $line = '...{0}...' -f $a, $b
+   [void]$sb.Append($line)
+   ```
+   同理，`$list.Add(('...' -f $a, $b))` 只有在整個 `('...' -f …)` 被自己的括號包住時才安全。
+10. **雙引號字串裡的反引號會吃掉收尾引號。**
+   `"…`{2}`"` 的最後一個反引號會把 `"` 跳脫掉，字串因此沒結束，錯誤會指向 20 行之後。
+   要放 `{}` 字面就改用單引號。
 
 ### 4.3 驗證指令速查
 
@@ -189,8 +218,13 @@ Get-ScheduledTask DiskMonitor,CWatchCollector,CWatchTray | Get-ScheduledTaskInfo
 # 歸因對帳（扣掉可疑列）
 powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\clean-attrib.ps1 -Top 12
 
-# AVG 搬移是否還健康
-powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\check-avg-migration.ps1
+# AVG 搬移是否還健康（五項：junction／服務／定義新舊／定義在 D:／安全性中心路徑）
+#   註：check-avg-migration.ps1 已移除，改用這五行手動查
+$link='C:\Program Files\AVG'
+(Get-Item $link -Force).LinkType; (Get-Service 'AVG Antivirus').Status
+(Get-ChildItem "$link\Antivirus\defs" -Directory | ? { $_.Name -notlike '*_stream' } | Sort LastWriteTime -Desc | Select -First 1).Name
+(Get-ChildItem 'D:\MX500\avg\ProgramFiles\Antivirus\defs' -Recurse -File | Sort LastWriteTime -Desc | Select -First 1).LastWriteTime
+(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | ? displayName -match 'AVG').pathToSignedProductExe
 
 # 儀表板（單次輸出、不啟服務）
 powershell -ExecutionPolicy Bypass -File D:\dev\disk-monitor\src\dashboard\cwatch-dashboard.ps1 `

@@ -723,6 +723,25 @@ foreach ($hStart in $pending) {
         (Format-Rate $(if ($null -ne $cP) { $cP.PeakWrite } else { 0 })),
         (Format-Bytes $(if ($null -ne $cL) { $cL.WriteBytes } else { 0 })),
         $todayGb, $sumFree, $coverage, $cLife, $cCdi))
+
+    # 其他磁碟區也各寫一行，讓趨勢圖可以切換看不同碟（C: 以外沒有 free/cover/life 的意義，填 -）
+    foreach ($dev in $devOrder) {
+        if ($dev -eq $cDev) { continue }
+        # 用 $physStats[$dev]（本小時已算好的統計），不要在這裡再呼叫 Get-IOStats —— 
+        # 這個 scope 的 $nowHour/$hEnd 是迴圈外的舊值，會算出 0。
+        $stD = $physStats[$dev]
+        if ($null -eq $stD) { continue }
+        $volLabel = $volMap[$dev]
+        if (-not $volLabel) { $volLabel = $dev }
+        $lineTxt = ('{0} | {1} disk {2} | med {3} | p90 {4} | max {5} | fs - | today - | free - | cover - | life - | cdi -' -f `
+            $hEnd.ToString('yyyy-MM-dd HH:mm'),
+            $volLabel,
+            (Format-Bytes $stD.WriteBytes),
+            (Format-Rate $stD.MedianWrite),
+            (Format-Rate $stD.P90Write),
+            (Format-Rate $stD.PeakWrite))
+        $summaryLines.Add($lineTxt)
+    }
 }
 
 # ------------------------------------------------------------------ latest.md

@@ -28,10 +28,10 @@ writes — `Win32_PerfRawData_PerfDisk_PhysicalDisk`:
 |---|---|
 | **Sampling** | One sample per minute per physical disk, from cumulative performance counters (byte-accurate deltas) |
 | **Attribution** | ETW Kernel-File events → `data\attrib\<date>.csv` (pid, process, volume, path, bytes, ops) |
-| **Hourly reports** | `reports\<yyyy-MM-dd>.md` — per-hour writes, top processes, per-volume breakdown, coverage |
+| **Hourly reports** | `reports\<yyyy-MM-dd>.md` — per-hour writes, top processes, per-volume breakdown, coverage. `logs\hourly-summary.log` gets **one line per volume** (`C: disk …`, `D: disk …`, `I: F: disk …`) |
 | **Daily comparison** | `reports\daily.md` — per-day writes for `C:`/`D:`, plus a **SMART reconciliation** column that flags days where physical writes and SMART HostWrites disagree |
-| **Web dashboard** | `http://localhost:8737/` — live rate, today's totals, 24-hour trend, per-process ranking (15 s refresh, no framework) |
-| **Tray icon** | Shows current rate and starts the dashboard |
+| **Web dashboard** | `http://localhost:8737/` — **one card per volume** (today's write/read + live rate), 24-hour trend switchable with `?v=D:` (or any volume label), per-process ranking (15 s refresh, no framework) |
+| **Tray icon** | Shows `C:` rate + today's total + the busiest *other* volume, and starts the dashboard |
 | **Diagnostics** | `status.ps1` (one-shot health), `clean-attrib.ps1` (drop impossible attributions and reconcile per disk), `check-scripts.ps1` (BOM + syntax check for every `.ps1`) |
 
 ## How it works (30 seconds)

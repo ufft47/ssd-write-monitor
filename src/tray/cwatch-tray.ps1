@@ -29,26 +29,43 @@ function Format-Bytes([double]$b) {
     return ('{0:N0} B' -f $b)
 }
 
-function Get-CurrentRate {
+function Get-VolumeRates {
+    # 回傳每個磁碟區目前的寫入速率（取每個 volumes 標籤的最後兩筆）。
+    # 用 volumes 標籤而不是裝置編號：裝置編號會在重開機後對調（2026-11-15 實測 dev 2/3 互換）。
     $day = (Get-Date).Date
     $f = Join-Path $script:Root ('data\phys\' + $day.ToString('yyyy-MM-dd') + '.csv')
-    if (-not (Test-Path -LiteralPath $f)) { return $null }
+    if (-not (Test-Path -LiteralPath $f)) { return @() }
     $lines = [IO.File]::ReadAllLines($f, [Text.Encoding]::UTF8)
-    $c = @()
-    for ($i = $lines.Length - 1; $i -ge 1 -and $c.Count -lt 4; $i--) {
+    $byVol = @{}
+    for ($i = $lines.Length - 1; $i -ge 1; $i--) {
         $p = $lines[$i].Split(',')
         if ($p.Length -lt 11) { continue }
-        if ($p[1] -ne '0') { continue }
-        $c += [pscustomobject]@{ ts = $p[0]; perf = [int64]$p[3]; freq = [int64]$p[4]; wb = [int64]$p[6] }
+        $v = $p[2]
+        if (-not $byVol.ContainsKey($v)) { $byVol[$v] = @() }
+        if ($byVol[$v].Count -lt 2) {
+            $byVol[$v] += [pscustomobject]@{ perf = [int64]$p[3]; freq = [int64]$p[4]; wb = [int64]$p[6]; ts = $p[0] }
+        }
+        # 四個磁碟區各兩筆就夠了
+        $done = $true
+        foreach ($k in $byVol.Keys) { if ($byVol[$k].Count -lt 2) { $done = $false } }
+        if ($done) { break }
     }
-    if ($c.Count -lt 2) { return $null }
-    $a = $c[1]; $b = $c[0]
-    $el = ($b.perf - $a.perf) / [double]$a.freq
-    if ($el -le 0) { return $null }
-    return [pscustomobject]@{
-        Rate = [math]::Max(0, $b.wb - $a.wb) / $el
-        Ts = $b.ts
+    $out = @()
+    foreach ($v in $byVol.Keys) {
+        $c = $byVol[$v]
+        if ($c.Count -lt 2) { continue }
+        $a = $c[1]; $b = $c[0]
+        $el = ($b.perf - $a.perf) / [double]$a.freq
+        if ($el -le 0) { continue }
+        $out += [pscustomobject]@{ Vol = $v; Rate = [math]::Max(0, $b.wb - $a.wb) / $el; Ts = $b.ts }
     }
+    return $out
+}
+
+function Get-CurrentRate {
+    $r = @(Get-VolumeRates | Where-Object { $_.Vol -eq 'C:' })
+    if ($r.Count -eq 0) { return $null }
+    return [pscustomobject]@{ Rate = $r[0].Rate; Ts = $r[0].Ts }
 }
 
 function Get-TodayTotal {
@@ -61,7 +78,7 @@ function Get-TodayTotal {
     for ($i = 1; $i -lt $lines.Length; $i++) {
         $p = $lines[$i].Split(',')
         if ($p.Length -lt 11) { continue }
-        if ($p[1] -ne '0') { continue }
+        if ($p[2] -ne 'C:') { continue }
         $wb = [int64]$p[6]
         if ($null -ne $prev -and $wb -ge $prev) { $sum += ($wb - $prev) }
         $prev = $wb
@@ -167,6 +184,8 @@ $timer.add_Tick({
         $r = Get-CurrentRate
         $total = Get-TodayTotal
         $cs = Get-CollectorState
+        $rates = @(Get-VolumeRates)
+        $busy = @($rates | Where-Object { $_.Vol -ne 'C:' } | Sort-Object Rate -Descending | Select-Object -First 1)
         $rateTxt = if ($null -ne $r) { ('{0}/s' -f (Format-Bytes $r.Rate)) } else { '—' }
         $color = [System.Drawing.Color]::FromArgb(63, 185, 80)
         if ($null -ne $r) {
@@ -176,7 +195,11 @@ $timer.add_Tick({
         $old = $notify.Icon
         $notify.Icon = New-DotIcon $color
         if ($null -ne $old) { $old.Dispose() }
-        $tip = ('C: {0} · 今日 {1} · collector {2}' -f $rateTxt, (Format-Bytes $total), $cs.Text)
+        $busyTxt = ''
+        if ($busy.Count -gt 0 -and $busy[0].Rate -gt 1MB) {
+            $busyTxt = (' · {0} {1}/s' -f $busy[0].Vol, (Format-Bytes $busy[0].Rate))
+        }
+        $tip = ('C: {0} · 今日 {1}{2} · {3}' -f $rateTxt, (Format-Bytes $total), $busyTxt, $cs.Text)
         if ($tip.Length -gt 120) { $tip = $tip.Substring(0, 120) }
         $notify.Text = $tip
         if ($cs.Age -lt 0) { $miPause.Enabled = $false; $miResume.Enabled = $true }

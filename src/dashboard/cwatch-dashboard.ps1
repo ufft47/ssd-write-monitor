@@ -157,15 +157,19 @@ function Get-AttribTail([string]$path, [int]$bytes = 262144) {
 }
 
 # ---------- 每小時走勢 ----------
-function Get-Hourly([int]$count = 24) {
+function Get-Hourly([int]$count = 24, [string]$vol = 'C:') {
     $f = Join-Path $Root 'logs\hourly-summary.log'
     if (-not (Test-Path -LiteralPath $f)) { return @() }
     $out = @()
-    foreach ($ln in (Get-Content -LiteralPath $f -Encoding UTF8 -Tail $count)) {
-        $m = [regex]::Match($ln, '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) \| C: disk ([\d\.]+) (KB|MB|GB)')
+    # 每顆碟各一行（`C: disk …`、`D: disk …`、`I: F: disk …`），
+    # 所以要往回讀更多行再過濾，否則只會拿到最後幾個小時。
+    $tailCount = $count * 8
+    foreach ($ln in (Get-Content -LiteralPath $f -Encoding UTF8 -Tail $tailCount)) {
+        $m = [regex]::Match($ln, '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) \| (.+?) disk ([\d\.]+) (KB|MB|GB)')
         if (-not $m.Success) { continue }
-        $v = [double]$m.Groups[2].Value
-        switch ($m.Groups[3].Value) {
+        if ($m.Groups[2].Value -ne $vol) { continue }
+        $v = [double]$m.Groups[3].Value
+        switch ($m.Groups[4].Value) {
             'KB' { $v = $v * 1KB }
             'MB' { $v = $v * 1MB }
             'GB' { $v = $v * 1GB }
@@ -301,15 +305,56 @@ function Get-HourDetail([string]$date, [int]$hour, [string]$Volume = 'C:') {
     return $value
 }
 
+# ---------- 每顆磁碟區一張卡（伺服器端產生、前端只換 innerHTML）----------
+# 卡片內容全部由後端算好，HTML 與 JSON 兩條路徑顯示才會一致。
+function Format-VolCards($vols) {
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($v in @($vols)) {
+        # 注意：不要把 -f 直接寫在 $sb.Append(...) 的括號裡 ——
+        # 那裡面的逗號是「方法參數分隔」，不是「格式陣列」，會導致索引超出範圍。
+        $html = ('<div class="card"><div class="k">{0} 今日寫／讀</div>' +
+            '<div class="v">{1} <span style="font-size:13px;color:#8b949e">／ {2}</span></div>' +
+            '<div class="k" style="margin-top:2px">目前寫入 <span style="color:{3}">{4}</span></div></div>') -f `
+            $v.name, $v.writeText, $v.readText, $v.rateColor, $v.rateText
+        [void]$sb.Append($html)
+    }
+    return $sb.ToString()
+}
+
 # ---------- 收集資料：HTML 與 JSON 的唯一來源 ----------
 # 回傳一個物件；JSON 直接序列化它，HTML 只是把它排版。兩邊不會各算一份。
-function Get-DashboardState([bool]$Live = $true) {
+function Get-DashboardState([bool]$Live = $true, [string]$ChartVol = 'C:') {
     $now = Get-Date
     $today = $now.Date
     # 讀整天（檔案很小，約 8k 行/日）；先前只讀尾巴 400 行，會讓「今日」只算到最近一小時
     $rows = Get-PhysTail $today 100000
     $c = Get-VolumeStat $rows 'C:'
     $d = Get-VolumeStat $rows 'D:'
+
+    # ---------- 所有磁碟區（以 volumes 字串為單位）----------
+    # I: 與 F: 是同一顆 8TB 實體碟的兩個磁碟區，phys 的 volumes 欄就是 "I: F:"，
+    # 因此直接用那個字串當鍵，不要拆成兩個（裝置層級的讀寫無法拆給不同磁碟區）。
+    $volNames = @($rows | ForEach-Object { $_.vols } | Sort-Object -Unique)
+    $volOrdered = @($volNames | Sort-Object @{ Expression = { if ($_ -eq 'C:') { 0 } else { 1 } } }, { $_ })
+    if ($volOrdered.Count -eq 0) { $volOrdered = @('C:') }
+    if ($volOrdered -notcontains $ChartVol) { $ChartVol = $volOrdered[0] }
+    $volRows = @()
+    foreach ($v in $volOrdered) {
+        $st = Get-VolumeStat $rows $v
+        $rateColor = '#3fb950'
+        if ($st.Rate -gt 5MB) { $rateColor = '#d29922' }
+        if ($st.Rate -gt 20MB) { $rateColor = '#f85149' }
+        $volRows += [pscustomobject]@{
+            name      = $v
+            write     = [double]$st.Write
+            writeText = (Format-Bytes $st.Write)
+            read      = [double]$st.Read
+            readText  = (Format-Bytes $st.Read)
+            rate      = [double]$st.Rate
+            rateText  = (Format-Rate $st.Rate)
+            rateColor = $rateColor
+        }
+    }
 
     $hb = Get-Heartbeat
     $hbAge = -1
@@ -428,7 +473,7 @@ function Get-DashboardState([bool]$Live = $true) {
         }
     }
 
-    $hourly = Get-Hourly 24
+    $hourly = Get-Hourly 24 $ChartVol
     $maxH = 0.0
     foreach ($h in $hourly) { if ($h.Bytes -gt $maxH) { $maxH = $h.Bytes } }
 
@@ -504,6 +549,10 @@ function Get-DashboardState([bool]$Live = $true) {
         rateColor      = $rateColor
         todayTotal     = [pscustomobject]@{ bytes = [double]$c.Write; text = (Format-Bytes $c.Write) }
         todayD         = [pscustomobject]@{ bytes = [double]$d.Write; text = (Format-Bytes $d.Write) }
+        volumes        = $volRows
+        volCards       = (Format-VolCards $volRows)
+        chartVolume    = $ChartVol
+        chartVolumes   = $volOrdered
         hours          = $hours
         processes      = (ConvertTo-ProcList $topAll 3)
         processesC     = (ConvertTo-ProcList $topC 3)
@@ -532,6 +581,16 @@ function Get-DashboardState([bool]$Live = $true) {
 function New-DashboardHtml($s, [bool]$Live = $true) {
     Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue
 
+    # 磁碟區切換連結（決定趨勢圖看哪一顆碟）
+    $volLinks = ''
+    foreach ($v in @($s.chartVolumes)) {
+        $on = ($v -eq $s.chartVolume)
+        $style = if ($on) { 'color:#58a6ff;font-weight:600' } else { 'color:#8b949e' }
+        $href = [uri]::EscapeDataString($v)
+        $text = [System.Web.HttpUtility]::HtmlEncode($v)
+        $volLinks += ('<a href="?v={0}" style="{1};margin-right:12px;text-decoration:none">{2}</a>' -f $href, $style, $text)
+    }
+
     function RowHtml($list, [bool]$showFiles) {
         $sb = New-Object System.Text.StringBuilder
         foreach ($a in $list) {
@@ -556,7 +615,7 @@ function New-DashboardHtml($s, [bool]$Live = $true) {
         $updInit = '最後更新 ' + $s.clock
         $hourBox = '<div id="hourDetail"></div>'
         # 圖表標題列＋「即時」按鈕（只有線上模式才有；-Once 不可以留 liveBtn）
-        $chartHead = '<div class="chartbar"><h2>最近 24 小時 C: 落盤</h2><button id="liveBtn" class="active" type="button">即時</button></div>'
+        $chartHead = '<div class="chartbar"><h2>最近 24 小時 ' + $s.chartVolume + ' 落盤</h2><button id="liveBtn" class="active" type="button">即時</button></div>'
         $liveCss = @'
 .chartbar{display:flex;align-items:center;justify-content:space-between;margin:26px 0 8px}
 .chartbar h2{margin:0}
@@ -617,8 +676,8 @@ var LIVE = true;
     setText('rate', s.rateText);
     var re = el('rate');
     if (re && s.rateColor) { re.style.color = s.rateColor; }
-    setText('todayC', s.todayTotal ? s.todayTotal.text : '');
-    setText('todayD', s.todayD ? s.todayD.text : '');
+    var vb = el('volBox');
+    if (vb && typeof s.volCards === 'string' && s.volCards.length) { vb.innerHTML = s.volCards; }
     if (s.collector) {
       setText('colltext', s.collector.state);
       var dot = el('colldot');
@@ -651,14 +710,14 @@ var LIVE = true;
   function refresh() {
     if (document.hidden || busy) { return; }
     busy = true;
-    fetch('/api/state', { cache: 'no-store' })
+    fetch('/api/state?v=' + encodeURIComponent(CHART_VOL), { cache: 'no-store' })
       .then(function (r) { if (!r.ok) { throw new Error('HTTP ' + r.status); } return r.json(); })
       .then(function (s) { apply(s); markOk(); })
       .catch(function () { markFail(); })
       .then(function () { busy = false; });
   }
   var selHour = null;
-  var selVol = 'C:';
+  var selVol = CHART_VOL;
   var selDate = '';
   var chartBox = document.getElementById('chart');
   var hourBox = document.getElementById('hourDetail');
@@ -806,7 +865,7 @@ var LIVE = true;
         $updHint = '靜態快照（不會自動更新）'
         $updInit = '靜態快照（' + $s.generatedLocal + '）'
         $hourBox = ''
-        $chartHead = '<h2>最近 24 小時 C: 落盤</h2>'
+        $chartHead = '<h2>最近 24 小時 ' + $s.chartVolume + ' 落盤</h2>'
         $liveCss = ''
         $js = @"
 var LIVE = false;
@@ -819,7 +878,7 @@ var LIVE = false;
     $html = @"
 <!DOCTYPE html>
 <html lang="zh-Hant"><head><meta charset="utf-8">
-<title>CWatch — C 碟寫入監控</title>
+<title>CWatch — 磁碟寫入監控</title>
 <style>
 :root{color-scheme:dark}
 body{font-family:"Segoe UI","Microsoft JhengHei",sans-serif;background:#0d1117;color:#c9d1d9;margin:0;padding:24px}
@@ -839,19 +898,19 @@ th{color:#8b949e;font-weight:500;font-size:12px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
 $liveCss
 </style></head><body>
-<h1>CWatch — C 碟寫入監控</h1>
+<h1>CWatch — 磁碟寫入監控</h1>
 <div class="muted">頁面產生：$($s.generatedLocal) · $updHint · <span id="upd">$updInit</span></div>
 <div class="muted" style="margin-top:4px">原始資料：歸因 <span id="attrts">$($s.attrMtime)</span> · 落盤 <span id="physts">$($s.physMtime)</span></div>
 
 <div class="cards">
   <div class="card"><div class="k">C: 目前寫入</div><div class="v" id="rate" style="color:$($s.rateColor)">$($s.rateText)</div></div>
-  <div class="card"><div class="k">C: 今日落盤</div><div class="v" id="todayC">$($s.todayTotal.text)</div></div>
-  <div class="card"><div class="k">D: 今日落盤</div><div class="v" id="todayD">$($s.todayD.text)</div></div>
+  <div id="volBox" style="display:contents">$($s.volCards)</div>
   <div class="card"><div class="k">Collector</div><div class="v" style="font-size:15px"><span class="dot" id="colldot" style="background:$($s.collector.color)"></span><span id="colltext">$($s.collector.state)</span></div></div>
   <div class="card"><div class="k">ETW 累計位元組</div><div class="v" style="font-size:15px" id="bytesseen">$($s.collector.bytesSeenText)</div></div>
 </div>
 
 $chartHead
+<div class="muted" style="margin:6px 0 2px">磁碟區：$($volLinks)</div>
 <div id="chart">$($s.svg)</div>
 $hourBox
 
@@ -877,6 +936,7 @@ ETW 只記錄寫入事件；「次數」是寫入 IRP 數，不代表檔案數�
 若某段資料的時間早於目前 collector 的啟動時間，那段可能由舊版程式產生，僅供參考。<br>
 <span id="srcline">$($s.collector.line)</span>
 </p>
+<script>var CHART_VOL = '$($s.chartVolume)';</script>
 <script>
 $js
 </script>
@@ -940,7 +1000,9 @@ while ($true) {
 
         $status = 200
         if ($reqPath -eq '/api/state') {
-            $body = (Get-DashboardState | ConvertTo-Json -Depth 8 -Compress)
+            $chartVolTxt = 'C:'
+            if ($query.ContainsKey('v') -and $query['v']) { $chartVolTxt = [string]$query['v'] }
+            $body = (Get-DashboardState $true $chartVolTxt | ConvertTo-Json -Depth 8 -Compress)
             $ctype = 'application/json; charset=utf-8'
         } elseif ($reqPath -eq '/api/hour') {
             $ctype = 'application/json; charset=utf-8'
@@ -966,7 +1028,9 @@ while ($true) {
                 }
             }
         } else {
-            $body = New-DashboardHtml (Get-DashboardState)
+            $chartVolTxt = 'C:'
+            if ($query.ContainsKey('v') -and $query['v']) { $chartVolTxt = [string]$query['v'] }
+            $body = New-DashboardHtml (Get-DashboardState $true $chartVolTxt)
             $ctype = 'text/html; charset=utf-8'
         }
 

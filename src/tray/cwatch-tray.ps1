@@ -21,6 +21,7 @@ $inv = [System.Globalization.CultureInfo]::InvariantCulture
 $script:Root = $Root
 $script:Port = $Port
 $script:DashProc = $null
+$script:TickCount = 0
 
 function Format-Bytes([double]$b) {
     if ([math]::Abs($b) -ge 1GB) { return ('{0:N2} GB' -f ($b / 1GB)) }
@@ -122,6 +123,51 @@ function Test-PortOpen([int]$p) {
     } catch { return $false }
 }
 
+# keep-alive 用：只問「8737 有沒有在 accept」，不做 HTTP 請求（400 ms 內一定有答案）
+function Test-DashboardUp {
+    $c = $null
+    try {
+        $c = New-Object System.Net.Sockets.TcpClient
+        $iar = $c.BeginConnect('127.0.0.1', $script:Port, $null, $null)
+        $ok = $iar.AsyncWaitHandle.WaitOne(400)
+        if (-not $ok) { return $false }
+        $c.EndConnect($iar)
+        return $c.Connected
+    } catch { return $false }
+    finally {
+        if ($null -ne $c) { $c.Close(); $c.Dispose() }
+    }
+}
+
+# logs\tray.log：UTF-8 無 BOM、append（5.1 的 Add-Content -Encoding UTF8 會加 BOM）
+function Write-TrayLog([string]$msg) {
+    try {
+        $dir = Join-Path $script:Root 'logs'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $line = ('{0}  {1}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $msg)
+        $enc = New-Object System.Text.UTF8Encoding($false)
+        [IO.File]::AppendAllText((Join-Path $dir 'tray.log'), $line + "`r`n", $enc)
+    } catch { }
+}
+
+# 回傳這次重啟的「原因」（給 log 用）
+function Get-DashboardDownReason {
+    if ($null -ne $script:DashProc) {
+        try {
+            if ($script:DashProc.HasExited) {
+                $code = $script:DashProc.ExitCode
+                $script:DashProc = $null
+                return ('程序已結束 exit={0}' -f $code)
+            }
+            return '程序還活著但沒有監聽'
+        } catch {
+            $script:DashProc = $null
+            return '查不到程序狀態'
+        }
+    }
+    return ('{0} 沒有監聽' -f $script:Port)
+}
+
 function Start-Dashboard {
     if ($script:NoDashboard) { return }
     if (Test-PortOpen $script:Port) { return }
@@ -204,6 +250,28 @@ $timer.add_Tick({
         $notify.Text = $tip
         if ($cs.Age -lt 0) { $miPause.Enabled = $false; $miResume.Enabled = $true }
         else { $miPause.Enabled = $true; $miResume.Enabled = $true }
+
+        # keep-alive：每 6 個 tick（10 秒 × 6 = 60 秒）確認儀表板還活著，掛了就拉回來
+        # -NoDashboard 時整段跳過（尊重「不要儀表板」的指定）
+        if (-not $script:NoDashboard) {
+            $script:TickCount++
+            if ($script:TickCount -ge 6) {
+                $script:TickCount = 0
+                if (-not (Test-DashboardUp)) {
+                    $reason = Get-DashboardDownReason
+                    try {
+                        Start-Dashboard
+                        if ($null -ne $script:DashProc) {
+                            Write-TrayLog ('dashboard 重啟（原因={0}；新 PID={1}）' -f $reason, $script:DashProc.Id)
+                        } else {
+                            Write-TrayLog ('dashboard 重啟失敗（原因={0}；Start-Dashboard 沒有回傳程序）' -f $reason)
+                        }
+                    } catch {
+                        Write-TrayLog ('dashboard 重啟失敗（原因={0}；{1}）' -f $reason, $_.Exception.Message)
+                    }
+                }
+            }
+        }
     } catch { }
 })
 

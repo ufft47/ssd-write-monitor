@@ -634,6 +634,11 @@ foreach ($hStart in $pending) {
         $null = $sb.AppendLine('')
         $null = $sb.AppendLine(('- 本小時落盤 **{0}**；中位數 {1}、P90 {2}、最大 {3}' -f `
             (Format-Bytes $cPhys.WriteBytes), (Format-Rate $cPhys.MedianWrite), (Format-Rate $cPhys.P90Write), (Format-Rate $cPhys.PeakWrite)))
+        # 讀≈寫的大寫入小時 = 典型排程重組／未緩衝 I/O（ETW 歸因不到）
+        if ($cPhys.WriteBytes -ge 5GB -and $cPhys.ReadBytes -gt 0 -and ($cPhys.ReadBytes / $cPhys.WriteBytes) -ge 0.8) {
+            $null = $sb.AppendLine(('- ⚠ 本小時讀取 {0}（寫入的 {1:N0}%）→ 疑似重組／未緩衝 I/O（例如 Windows 排程磁碟重組），程式歸因無法覆蓋' -f `
+                (Format-Bytes $cPhys.ReadBytes), ($cPhys.ReadBytes / $cPhys.WriteBytes * 100)))
+        }
         $zeroNote = ''
         if ($cPhys.Pairs -gt 0 -and ($cPhys.ZeroWrites / $cPhys.Pairs) -ge 0.5) { $zeroNote = ' —— 多數樣本沒有寫入' }
         $null = $sb.AppendLine(('- 零寫入樣本 **{0}/{1}**（{2:N0}%）{3}' -f `

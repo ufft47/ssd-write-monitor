@@ -156,37 +156,101 @@ function Get-AttribTail([string]$path, [int]$bytes = 262144) {
     return $rows
 }
 
-# ---------- 每小時走勢 ----------
-function Get-Hourly([int]$count = 24, [string]$vol = 'C:') {
-    $f = Join-Path $Root 'logs\hourly-summary.log'
-    if (-not (Test-Path -LiteralPath $f)) { return @() }
-    $out = @()
-    # 每顆碟各一行（`C: disk …`、`D: disk …`、`I: F: disk …`），
-    # 所以要往回讀更多行再過濾，否則只會拿到最後幾個小時。
-    $tailCount = $count * 8
-    foreach ($ln in (Get-Content -LiteralPath $f -Encoding UTF8 -Tail $tailCount)) {
-        $m = [regex]::Match($ln, '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) \| (.+?) disk ([\d\.]+) (KB|MB|GB)')
-        if (-not $m.Success) { continue }
-        if ($m.Groups[2].Value -ne $vol) { continue }
-        $v = [double]$m.Groups[3].Value
-        switch ($m.Groups[4].Value) {
-            'KB' { $v = $v * 1KB }
-            'MB' { $v = $v * 1MB }
-            'GB' { $v = $v * 1GB }
-        }
-        $out += [pscustomobject]@{
-            When = $m.Groups[1].Value
-            # 摘要行的時間戳是「區間結束時刻」（disk-report.ps1 用 $hEnd）。
-            # 明細是依 minute 的 HH 過濾，也就是「區間起始」。這裡先算好起始時刻，
-            # 讓長條圖 data-hour 與明細用同一個定義（否則點 16:00 會看到 16:00–16:59）。
-            Start = ([datetime]::ParseExact($m.Groups[1].Value, 'yyyy-MM-dd HH:mm', $null)).AddHours(-1)
-            Bytes = $v
+# ---------- 某一小時的實體讀寫（讀與寫的唯一來源） ----------
+# key = 該區間的起點（prev.ts.Hour）：同一格的讀與寫一定來自同一區間，
+# 不會出現「寫 12:00 卻讀 13:00」這種錯一格的問題。
+# 只採「同裝置、perf 遞增（跳過重開機重置）、delta >= 0」的配對。
+function Get-PhysHourly([string]$date, [string]$vol = 'C:') {
+    $res = @{}
+    $f = Join-Path $Root ('data\phys\' + $date + '.csv')
+    if (-not (Test-Path -LiteralPath $f)) { return $res }
+    $lines = [IO.File]::ReadAllLines($f, [Text.Encoding]::UTF8)
+    $list = @()
+    for ($i = 1; $i -lt $lines.Length; $i++) {
+        $p = $lines[$i].Split(',')
+        if ($p.Length -lt 11) { continue }
+        if ($p[2] -ne $vol) { continue }
+        $list += [pscustomobject]@{
+            ts   = [datetime]::ParseExact($p[0], 'yyyy-MM-dd HH:mm:ss', $inv)
+            dev  = $p[1]
+            perf = [int64]$p[3]
+            rb   = [int64]$p[5]
+            wb   = [int64]$p[6]
         }
     }
-    foreach ($o in $out) {
-        $o | Add-Member -NotePropertyName StartHour -NotePropertyValue $o.Start.Hour -Force
-        $o | Add-Member -NotePropertyName StartDate -NotePropertyValue $o.Start.ToString('yyyy-MM-dd') -Force
-        $o | Add-Member -NotePropertyName Label -NotePropertyValue ('{0:HH:mm}–{1:HH:mm}' -f $o.Start, $o.Start.AddHours(1)) -Force
+    if ($list.Count -lt 2) { return $res }
+    $prev = $null
+    foreach ($cur in @($list | Sort-Object ts)) {
+        if ($null -ne $prev -and $cur.dev -eq $prev.dev -and $cur.perf -gt $prev.perf) {
+            $h = $prev.ts.Hour
+            if (-not $res.ContainsKey($h)) { $res[$h] = [pscustomobject]@{ Write = [double]0; Read = [double]0 } }
+            $dwb = $cur.wb - $prev.wb
+            $drb = $cur.rb - $prev.rb
+            if ($dwb -gt 0) { $res[$h].Write += $dwb }
+            if ($drb -gt 0) { $res[$h].Read += $drb }
+        }
+        $prev = $cur
+    }
+    return $res
+}
+
+# ---------- 每小時走勢 ----------
+function Get-Hourly([int]$count = 24, [string]$vol = 'C:') {
+    # 主來源：data\phys\<日期>.csv —— 讀取與寫入都用同一個 key（區間起點 HH），
+    # 所以「寫 44.22 GB / 讀 36.65 GB」一定落在同一格（2026-11-19 12:00）。
+    # 備援：logs\hourly-summary.log（只有寫入量；時間戳是區間「結束」→ 起點 = ts - 1h），
+    # 只在 phys 缺該小時時補位，讀取留 0（suspect 需要 Read>0，因此不會誤標）。
+    $map = @{}
+    $now = Get-Date
+    for ($d = $now.Date.AddDays(-1); $d -le $now.Date; $d = $d.AddDays(1)) {
+        $dd = $d.ToString('yyyy-MM-dd')
+        $ph = Get-PhysHourly $dd $vol
+        foreach ($h in $ph.Keys) {
+            $map[($dd + ' ' + ('{0:00}' -f $h))] = [pscustomobject]@{
+                Start = $d.AddHours($h)
+                Bytes = [double]$ph[$h].Write
+                Read  = [double]$ph[$h].Read
+            }
+        }
+    }
+    $f = Join-Path $Root 'logs\hourly-summary.log'
+    if (Test-Path -LiteralPath $f) {
+        foreach ($ln in (Get-Content -LiteralPath $f -Encoding UTF8 -Tail ($count * 8))) {
+            $m = [regex]::Match($ln, '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) \| (.+?) disk ([\d\.]+) (KB|MB|GB)')
+            if (-not $m.Success) { continue }
+            if ($m.Groups[2].Value -ne $vol) { continue }
+            $v = [double]$m.Groups[3].Value
+            switch ($m.Groups[4].Value) {
+                'KB' { $v = $v * 1KB }
+                'MB' { $v = $v * 1MB }
+                'GB' { $v = $v * 1GB }
+            }
+            $end = [datetime]::ParseExact($m.Groups[1].Value, 'yyyy-MM-dd HH:mm', $null)
+            $start = $end.AddHours(-1)
+            $k = $start.ToString('yyyy-MM-dd HH')
+            if ($map.ContainsKey($k)) { continue }
+            $map[$k] = [pscustomobject]@{ Start = $start; Bytes = $v; Read = [double]0 }
+        }
+    }
+
+    # 依時間 key 去重（同一小時只會有一個 key）＋排序（舊→新）＋只留最後 $count 個
+    $keys = @($map.Keys | Sort-Object)
+    if ($keys.Count -gt $count) { $keys = @($keys | Select-Object -Last $count) }
+
+    $out = @()
+    foreach ($k in $keys) {
+        $x = $map[$k]
+        $sus = ($x.Bytes -ge 5GB -and $x.Read -gt 0 -and ($x.Read / $x.Bytes) -ge 0.8)
+        $out += [pscustomobject]@{
+            When      = $x.Start.ToString('yyyy-MM-dd HH:mm')
+            Start     = $x.Start
+            StartHour = $x.Start.Hour
+            StartDate = $x.Start.ToString('yyyy-MM-dd')
+            Label     = ('{0:HH:mm}–{1:HH:mm}' -f $x.Start, $x.Start.AddHours(1))
+            Bytes     = [double]$x.Bytes
+            Read      = [double]$x.Read
+            Suspect   = $sus
+        }
     }
     return $out
 }
@@ -224,11 +288,27 @@ function Get-HourDetail([string]$date, [int]$hour, [string]$Volume = 'C:') {
         }
     }
 
+    # 同一小時的實體讀取（判定「疑似重組」用）；寫入優先沿用摘要（與長條圖同一個數字）
+    $ph = @{}
+    if ($Volume -ne 'all') { $ph = Get-PhysHourly $date $Volume }
+    $rdBytes = [double]0
+    if ($ph.ContainsKey($hour)) {
+        # 讀與寫都取同一格（key＝區間起點），比 summary 的「結束時刻」更不容易錯位
+        $rdBytes = $ph[$hour].Read
+        $physBytes = $ph[$hour].Write
+        $physText = Format-Bytes $physBytes
+    }
+    $ratioTxt = '-'
+    if ($physBytes -gt 0) { $ratioTxt = ('{0:N0}%' -f ($rdBytes / $physBytes * 100)) }
+    $isSuspect = ($physBytes -ge 5GB -and $rdBytes -gt 0 -and ($rdBytes / $physBytes) -ge 0.8)
+
     $empty = [pscustomobject]@{
         date = $date; hour = $hour; label = $label; volume = $Volume
         totalBytes = [double]0; totalBytesText = (Format-Bytes 0)
         totalOps = [double]0; totalOpsText = '0'
         physicalBytes = $physBytes; physicalBytesText = $physText
+        readBytes = $rdBytes; readText = (Format-Bytes $rdBytes)
+        ratioText = $ratioTxt; suspect = $isSuspect
         groups = 0; rows = @()
     }
     if (-not (Test-Path -LiteralPath $file)) { return $empty }
@@ -299,6 +379,8 @@ function Get-HourDetail([string]$date, [int]$hour, [string]$Volume = 'C:') {
         totalBytes = $totalBytes; totalBytesText = (Format-Bytes $totalBytes)
         totalOps = $totalOps; totalOpsText = ('{0:N0}' -f $totalOps)
         physicalBytes = $physBytes; physicalBytesText = $physText
+        readBytes = $rdBytes; readText = (Format-Bytes $rdBytes)
+        ratioText = $ratioTxt; suspect = $isSuspect
         groups = $agg.Count; rows = $rows
     }
     $script:hourCache[$key] = [pscustomobject]@{ Mtime = $mtime; Value = $value }
@@ -491,8 +573,15 @@ function Get-DashboardState([bool]$Live = $true, [string]$ChartVol = 'C:') {
             $dyn = ''
             # data-hour 用「起始小時」，與明細的過濾條件一致
             if ($Live) { $dyn = (' data-hour="{0}" data-date="{1}" style="cursor:pointer"' -f $x.StartHour, $x.StartDate) }
-            $bars += ('<rect x="{0}" y="{1}" width="{2}" height="{3}" fill="#1f6feb" rx="1"{6}><title>{4}（{5}）</title></rect>' -f `
-                $xpos, ($hgt - $bh), $bw, $bh, $x.Label, (Format-Bytes $x.Bytes), $dyn)
+            # 讀≈寫的大寫入小時（排程重組／未緩衝 I/O）用不同顏色，tooltip 也說清楚
+            $fill = '#1f6feb'
+            $warn = ''
+            if ($x.Suspect) {
+                $fill = '#d29922'
+                $warn = ('；讀 {0} ＝ 寫入的 {1:N0}%，疑似重組／未緩衝 I/O' -f (Format-Bytes $x.Read), ($x.Read / $x.Bytes * 100))
+            }
+            $bars += ('<rect x="{0}" y="{1}" width="{2}" height="{3}" fill="{7}" rx="1"{6}><title>{4}（{5}）{8}</title></rect>' -f `
+                $xpos, ($hgt - $bh), $bw, $bh, $x.Label, (Format-Bytes $x.Bytes), $dyn, $fill, $warn)
             $i++
         }
         $svg = ('<svg width="{0}" height="{1}" viewBox="0 0 {0} {1}">{2}</svg>' -f $w, $hgt, $bars)
@@ -536,7 +625,12 @@ function Get-DashboardState([bool]$Live = $true, [string]$ChartVol = 'C:') {
             startDate = [string]$x.StartDate
             label     = [string]$x.Label
             bytes     = [double]$x.Bytes
+            bytesText = (Format-Bytes $x.Bytes)
             text      = (Format-Bytes $x.Bytes)
+            read      = [double]$x.Read
+            readText  = (Format-Bytes $x.Read)
+            ratioText = $(if ($x.Bytes -gt 0) { '{0:N0}%' -f ($x.Read / $x.Bytes * 100) } else { '-' })
+            suspect   = [bool]$x.Suspect
         }
     }
 
@@ -772,8 +866,17 @@ var LIVE = true;
     head.textContent = '區間 ' + d.label + '（' + volTxt + '）'
       + '　ETW 邏輯寫入 ' + d.totalBytesText
       + '　｜　同時段 PhysicalDisk ' + (d.physicalBytesText || '-')
+      + '　讀取 ' + (d.readText || '-') + '（寫入的 ' + (d.ratioText || '-') + '）'
       + '　（兩者量測不同，不可相加）';
     box.appendChild(head);
+    if (d.suspect) {
+      var warnLine = document.createElement('div');
+      warnLine.className = 'muted';
+      warnLine.style.color = '#d29922';
+      warnLine.style.margin = '0 0 8px';
+      warnLine.textContent = '疑似 Windows 排程重組／未緩衝 I/O：這段寫入不是應用程式造成的，ETW 歸因不到';
+      box.appendChild(warnLine);
+    }
     var bar = document.createElement('div');
     bar.className = 'muted';
     bar.style.margin = '0 0 8px';
